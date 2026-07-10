@@ -352,7 +352,10 @@ class PlaywrightAutomationEngine:
         form_fields = []
         with sync_playwright() as p:
             has_auth = os.path.exists(auth_path)
-            browser = p.chromium.launch(headless=True) # Always headless for crawling
+            
+            # Start headless (can relaunch headed if needed)
+            run_headless = self.headless if has_auth else False
+            browser = p.chromium.launch(headless=run_headless)
             
             if has_auth:
                 print(f"Loading saved session cookies for crawl from {auth_path}")
@@ -365,6 +368,9 @@ class PlaywrightAutomationEngine:
                 page.goto(url, wait_until="load", timeout=20000)
             except Exception as e:
                 print(f"Navigation warning: {e}. Trying to parse load state.")
+                
+            # Perform login handling (includes headed relaunch and wait loops)
+            browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
                 
             # Wait for inputs to render
             try:
@@ -445,92 +451,65 @@ class PlaywrightAutomationEngine:
         return form_fields
 
     def _verify_submission_success(self, page, original_url) -> tuple[bool, str]:
-        # Helper to verify if the form submit succeeded.
-        # Returns (success_boolean, error_message)
+        """
+        Verifies if the form submission succeeded by checking for redirects,
+        success alerts, or validation error messages on the screen.
+        """
         try:
-            # Run advanced DOM-based validation check
-            check_res = page.evaluate("""() => {
-                // 1. Check for inputs with aria-invalid="true"
-                let invalidInputs = document.querySelectorAll("input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='true']");
-                if (invalidInputs.length > 0) {
-                    return {
-                        success: false,
-                        msg: `Form submission failed: ${invalidInputs.length} required fields are missing or invalid.`
-                    };
-                }
+            # 1. Check if the URL has changed (redirected to list or dashboard)
+            current_url = page.url
+            if current_url != original_url:
+                print(f"Submission verified: Redirected to {current_url}")
+                return True, ""
                 
-                // 2. Check for elements with class containing 'Mui-error' or '.error' or '.invalid' that are visible
-                let errorElements = Array.from(document.querySelectorAll(".Mui-error, .error, .invalid-feedback, .error-message"));
-                let visibleErrors = errorElements.filter(el => {
+            # 2. Check for explicit success toast notifications or alerts
+            success_msg = page.evaluate("""() => {
+                let successEls = Array.from(document.querySelectorAll(".MuiAlert-message, .toast, .notification, .alert-success, div"));
+                for (let el of successEls) {
+                    if (el.innerText) {
+                        let txt = el.innerText.toLowerCase();
+                        if ((txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) && txt.length < 150) {
+                            return el.innerText;
+                        }
+                    }
+                }
+                return null;
+            }""")
+            if success_msg:
+                print(f"Submission verified: Success message detected: '{success_msg}'")
+                return True, ""
+                
+            # 3. Check for explicit validation/submission error messages on screen
+            error_msg = page.evaluate("""() => {
+                // Check Mui-error or error classes
+                let errorEls = Array.from(document.querySelectorAll(".Mui-error, .error, .invalid-feedback, .error-message, .alert-danger"));
+                let visibleErrors = errorEls.filter(el => {
                     let style = window.getComputedStyle(el);
                     return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
                 });
                 if (visibleErrors.length > 0) {
                     let errTexts = visibleErrors.map(el => el.innerText.trim()).filter(Boolean);
-                    let uniqTexts = Array.from(new Set(errTexts)).slice(0, 3);
-                    let detail = uniqTexts.length > 0 ? ": " + uniqTexts.join("; ") : "";
-                    return {
-                        success: false,
-                        msg: `Form submission failed due to validation errors${detail}`
-                    };
+                    let uniq = Array.from(new Set(errTexts));
+                    return uniq.length > 0 ? uniq.join("; ") : "Form submission failed due to validation errors.";
                 }
                 
-                // 3. Check for any empty fields labeled with red asterisks (required)
-                let requiredLabels = [];
-                document.querySelectorAll("label, span, legend, p").forEach(el => {
-                    if (el.innerText && el.innerText.trim().includes("*") && el.innerText.length < 100) {
-                        requiredLabels.push(el);
-                    }
-                });
-                
-                let emptyRequired = [];
-                requiredLabels.forEach(label => {
-                    let input = null;
-                    let labelFor = label.getAttribute("for");
-                    if (labelFor) {
-                        input = document.getElementById(labelFor);
-                    }
-                    if (!input) {
-                        input = label.querySelector("input, select, textarea");
-                    }
-                    if (!input) {
-                        let parent = label.parentElement;
-                        if (parent) {
-                            input = parent.querySelector("input, select, textarea");
-                            if (!input && parent.parentElement) {
-                                input = parent.parentElement.querySelector("input, select, textarea");
-                            }
-                        }
-                    }
-                    
-                    if (input) {
-                        let val = input.value;
-                        if (!val || !val.trim() || val.trim().toLowerCase() === "select") {
-                            let name = label.innerText.replace("*", "").trim().split("\\n")[0];
-                            if (name && !emptyRequired.includes(name)) {
-                                emptyRequired.push(name);
-                            }
-                        }
-                    }
-                });
-                
-                if (emptyRequired.length > 0) {
-                    return {
-                        success: false,
-                        msg: `Form submission failed: required fields are empty: ${emptyRequired.join(", ")}`
-                    };
+                // Check if any required field has aria-invalid=\"true\"
+                let invalidInput = document.querySelector("input[aria-invalid='true'], select[aria-invalid='true'], textarea[aria-invalid='true']");
+                if (invalidInput) {
+                    return "Required fields are invalid or missing.";
                 }
-                
-                return { success: true, msg: "" };
+                return null;
             }""")
             
-            if not check_res.get("success", True):
-                return False, check_res.get("msg", "Form submission failed.")
+            if error_msg:
+                return False, f"Form submission failed: {error_msg}"
                 
+            # 4. Default fallback: If no errors are found, assume success!
             return True, ""
         except Exception as ex:
+            print(f"Verification warning: {ex}")
             return True, ""
-
+            
     def _perform_auto_login(self, page: Any) -> bool:
         """
         Attempts to perform programmatic auto-login if password field is visible.
@@ -560,6 +539,83 @@ class PlaywrightAutomationEngine:
             except Exception as login_ex:
                 print(f"Auto-login exception: {login_ex}")
         return False
+
+
+    def _handle_login_flow(self, p: Any, browser: Any, context: Any, page: Any, url: str, auth_path: str, run_headless: bool) -> tuple[Any, Any, Any]:
+        """
+        Ensures the user is authenticated. If a login page is detected, relaunch headed if headless
+        and wait up to 180 seconds for the user to log in manually and for the target form to load.
+        """
+        # Wait up to 4 seconds for any input to appear
+        try:
+            page.wait_for_selector("input:not([type='hidden']), textarea, select", timeout=4000)
+        except Exception:
+            pass
+
+        # Check if it's the login page
+        inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
+        has_password = page.query_selector("input[type='password']") is not None
+        
+        # If there is a password field and inputs are few, we are on a login page
+        is_login_page = has_password or inputs_count <= 2
+        
+        if is_login_page:
+            print("Login page detected. Initiating authentication flow...")
+            
+            # Try programmatic auto-login first as a quick fallback helper
+            self._perform_auto_login(page)
+            
+            # Recheck if still on login page
+            inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
+            has_password = page.query_selector("input[type='password']") is not None
+            still_on_login = has_password or inputs_count <= 2
+            
+            if still_on_login:
+                if run_headless:
+                    print("Relaunching browser in headed mode to allow manual login...")
+                    page.close()
+                    context.close()
+                    browser.close()
+                    
+                    # Launch headed browser
+                    browser = p.chromium.launch(headless=False)
+                    context = browser.new_context()
+                    page = context.new_page()
+                    try:
+                        page.goto(url, wait_until="load", timeout=40000)
+                    except Exception as e:
+                        print(f"Page load warning on relaunch: {e}")
+                        
+                    # Quick auto-login retry on headed instance
+                    self._perform_auto_login(page)
+                
+                print("--------------------------------------------------------------------------------")
+                print("ACTION REQUIRED: Please log in manually in the browser window.")
+                print("Solve any CAPTCHAs, OTPs, or enter your credentials.")
+                print("The system will automatically resume once the form is loaded.")
+                print("--------------------------------------------------------------------------------")
+                
+                # Wait up to 180 seconds for manual login
+                logged_in = False
+                for sec in range(180):
+                    page.wait_for_timeout(1000)
+                    has_password = page.query_selector("input[type='password']") is not None
+                    inputs = page.query_selector_all("input:not([type='hidden']), textarea, select")
+                    if not has_password and len(inputs) > 2:
+                        logged_in = True
+                        print("Authentication successful! Form fields detected.")
+                        break
+                    if (sec + 1) % 10 == 0:
+                        print(f"Waiting for manual login... ({sec + 1}/180 seconds elapsed)")
+                
+                if not logged_in:
+                    print("Timeout waiting for manual login.")
+            
+            # Save the cookies/session state
+            context.storage_state(path=auth_path)
+            print(f"Successfully saved authenticated session state to: {auth_path}")
+            
+        return browser, context, page
 
     def fill_form(
         self, 
@@ -600,75 +656,8 @@ class PlaywrightAutomationEngine:
             except Exception as e:
                 print(f"Initial page load warning: {e}")
                 
-            # Verify if we are logged in (i.e. some form input fields are visible)
-            # Since we haven't scanned yet, we look for any standard input/textarea on the page
-            is_logged_in = False
-            if has_auth:
-                try:
-                    # Wait up to 4 seconds for any input to appear
-                    page.wait_for_selector("input:not([type='hidden']), textarea, select", timeout=4000)
-                    
-                    # Check if it's the login page by inspecting if password input exists but no other inputs exist
-                    inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
-                    has_password = page.query_selector("input[type='password']") is not None
-                    if has_password and inputs_count <= 3:
-                        print("Redirected to login page. Session cookies are invalid/expired.")
-                        is_logged_in = False
-                    else:
-                        is_logged_in = True
-                except Exception:
-                    is_logged_in = False
-            
-            # Relaunch headed if redirected to login page or no session exists
-            if not is_logged_in:
-                # Try auto-login first
-                login_attempted = self._perform_auto_login(page)
-                
-                # Verify if we are logged in now
-                inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
-                has_password = page.query_selector("input[type='password']") is not None
-                is_logged_in = not has_password or inputs_count > 3
-                
-                if not is_logged_in:
-                    if run_headless:
-                        print("Relaunching browser visibly to allow manual login...")
-                        page.close()
-                        context.close()
-                        browser.close()
-                        
-                        browser = p.chromium.launch(headless=False)
-                        context = browser.new_context()
-                        page = context.new_page()
-                        try:
-                            page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                        except Exception as e:
-                            print(f"Page load warning on relaunch: {e}")
-                        
-                        # Try auto-login again on headed instance
-                        self._perform_auto_login(page)
-                    
-                    print("--------------------------------------------------------------------------------")
-                    print("ACTION REQUIRED: If this site requires authentication, please log in now.")
-                    print("The system is waiting for the target form fields to load...")
-                    print("--------------------------------------------------------------------------------")
-                    
-                    # Wait up to 60 seconds for the user to login and the form to load
-                    print("Waiting for login to complete and form to load...")
-                    logged_in = False
-                    for _ in range(60):
-                        has_password = page.query_selector("input[type='password']") is not None
-                        inputs = page.query_selector_all("input:not([type='hidden']), textarea, select")
-                        if not has_password and len(inputs) > 2:  # Stricter check (> 2) to ensure the form loaded
-                            logged_in = True
-                            break
-                        page.wait_for_timeout(1000)
-                    
-                    if not logged_in:
-                        print("Timeout waiting for form inputs. Saving current session cookies...")
-                
-                # Save session cookies
-                context.storage_state(path=auth_path)
-                print(f"Successfully saved authenticated session state to: {auth_path}")
+            # Perform login handling (includes headed relaunch and wait loops)
+            browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
 
             # --- Now we are logged in. Let's Crawl the Form Fields ---
             # Wait for the form inputs to render dynamically
@@ -1058,56 +1047,8 @@ class PlaywrightAutomationEngine:
             except Exception as e:
                 print(f"Initial page load warning: {e}")
                 
-            is_logged_in = False
-            if has_auth:
-                try:
-                    page.wait_for_selector("input:not([type='hidden']), textarea, select", timeout=4000)
-                    inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
-                    has_password = page.query_selector("input[type='password']") is not None
-                    if has_password and inputs_count <= 3:
-                        is_logged_in = False
-                    else:
-                        is_logged_in = True
-                except Exception:
-                    is_logged_in = False
-            
-            if not is_logged_in:
-                # Try auto-login first
-                login_attempted = self._perform_auto_login(page)
-                
-                # Check if logged in now
-                inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
-                has_password = page.query_selector("input[type='password']") is not None
-                is_logged_in = not has_password or inputs_count > 3
-                
-                if not is_logged_in:
-                    if run_headless:
-                        page.close()
-                        context.close()
-                        browser.close()
-                        browser = p.chromium.launch(headless=False)
-                        context = browser.new_context()
-                        page = context.new_page()
-                        try:
-                            page.goto(url, wait_until="load", timeout=30000)
-                        except Exception as e:
-                            print(f"Page load warning on relaunch: {e}")
-                            
-                        # Try auto-login on headed instance
-                        self._perform_auto_login(page)
-                    
-                    print("Waiting for login to complete and form to load...")
-                    logged_in = False
-                    for _ in range(60):
-                        has_password = page.query_selector("input[type='password']") is not None
-                        inputs = page.query_selector_all("input:not([type='hidden']), textarea, select")
-                        if not has_password and len(inputs) > 2:
-                            logged_in = True
-                            break
-                        page.wait_for_timeout(1000)
-                
-                context.storage_state(path=auth_path)
-                print(f"Saved authenticated session state.")
+            # Perform login handling (includes headed relaunch and wait loops)
+            browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
 
             # --- Now we loop through the records ---
             for record_idx, record in enumerate(records):

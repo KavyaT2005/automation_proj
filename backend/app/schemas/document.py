@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from datetime import datetime
 
 class DocumentBase(BaseModel):
@@ -11,6 +11,10 @@ class DocumentCreate(DocumentBase):
 
 class DocumentReview(BaseModel):
     corrected_json: Dict[str, Any]
+
+class ExtractForTargetRequest(BaseModel):
+    target_url: Optional[str] = None
+    target_fields: Optional[List[Dict[str, Any]]] = None
 
 class DocumentResponse(DocumentBase):
     id: str

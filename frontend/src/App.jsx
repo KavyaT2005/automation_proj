@@ -4,7 +4,7 @@ import {
   RefreshCw, Play, Check, Eye, AlertCircle, HelpCircle, Save,
   Plus, X, Trash2, Layers, Layout, Activity, Terminal, Database, 
   ShieldAlert, Monitor, ChevronRight, Sliders, Settings, Shield,
-  Key, Lock
+  Key, Lock, Zap
 } from 'lucide-react';
 
 const STANDARD_FIELDS = [
@@ -109,9 +109,10 @@ export default function App() {
   const [activeRecordIdx, setActiveRecordIdx] = useState(0);
 
   // Form Automation states
-  const [targetUrl, setTargetUrl] = useState('http://erpretails.s3-website.ap-south-1.amazonaws.com/admin/customer/form?type=create'); // Default URL
+  const [targetUrl, setTargetUrl] = useState(''); // Default URL
   const [crawledFields, setCrawledFields] = useState([]);
   const [crawling, setCrawling] = useState(false);
+  const [guidedExtracting, setGuidedExtracting] = useState(false);
   const [filling, setFilling] = useState(false);
   const [fillResult, setFillResult] = useState(null);
   const [showScreenshot, setShowScreenshot] = useState(false);
@@ -539,8 +540,8 @@ export default function App() {
     fetchStats();
     fetchAdminSettings();
     fetchAdminData();
-    // Default to the actual retail ERP site
-    setTargetUrl('http://erpretails.s3-website.ap-south-1.amazonaws.com/admin/customer/form?type=create');
+    // Default to empty
+    setTargetUrl('');
     const interval = setInterval(() => {
       fetchAdminData();
       fetchStats(); // Update connection status periodically!
@@ -585,7 +586,6 @@ export default function App() {
 
     setFillResult(null);
     setBulkResult(null);
-    setCrawledFields([]);
 
     if (!backendOnline) {
       addLog(`Backend offline. Queueing ${selectedFiles.length} file(s) for offline sync...`, 'sys');
@@ -600,6 +600,12 @@ export default function App() {
     await Promise.all(selectedFiles.map(async (file, index) => {
       const formData = new FormData();
       formData.append('file', file);
+      if (crawledFields && crawledFields.length > 0) {
+        formData.append('target_fields', JSON.stringify(crawledFields));
+        if (targetUrl) {
+          formData.append('target_url', targetUrl);
+        }
+      }
       addLog(`Uploading file buffer: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'db');
 
       try {
@@ -709,7 +715,9 @@ export default function App() {
         const updatedDoc = await res.json();
         setDocumentData(updatedDoc);
         addLog('Handshake complete: Mapping memory updated successfully.', 'db');
-        alert('Corrections saved and mapping memory updated!');
+        if (confirm('Corrections saved and mapping memory updated! Do you want to proceed to Step 3: Run Autofill?')) {
+          setActivePage('automation');
+        }
       }
     } catch (e) {
       addLog('Error: Failed to save changes to database.', 'sys');
@@ -741,6 +749,44 @@ export default function App() {
       alert('Crawl crashed.');
     } finally {
       setCrawling(false);
+    }
+  };
+
+  // Target-Guided Document Extraction
+  const runTargetGuidedExtraction = async () => {
+    if (!documentId) return;
+    setGuidedExtracting(true);
+    addLog(`Running target-guided extraction for document ID: ${documentId.substring(0, 8)}...`, 'slm');
+    
+    try {
+      const res = await secureFetch(`/api/v1/documents/${documentId}/extract-for-target`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          target_url: targetUrl,
+          target_fields: crawledFields
+        })
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        setDocumentData(data);
+        setUploadProgress('completed');
+        addLog(`Target-guided extraction completed successfully! Only target fields extracted.`, 'slm');
+      } else {
+        const errData = await res.json().catch(() => ({}));
+        const errMsg = errData.detail || 'Target-guided extraction rejected.';
+        addLog(`Target-guided extraction error: ${errMsg}`, 'sys');
+        alert(`Extraction failed: ${errMsg}`);
+      }
+    } catch (err) {
+      console.error(err);
+      addLog('Execution crash on target-guided extraction service.', 'sys');
+      alert('Extraction crashed.');
+    } finally {
+      setGuidedExtracting(false);
     }
   };
 
@@ -930,7 +976,8 @@ export default function App() {
   // Get active form state keys
   const getActiveFields = () => {
     if (!documentData) return {};
-    const docData = documentData.corrected_json || documentData.extracted_json || {};
+    const hasCorrected = documentData.corrected_json && Object.keys(documentData.corrected_json).length > 0;
+    const docData = hasCorrected ? documentData.corrected_json : (documentData.extracted_json || {});
     if (docData.records && Array.isArray(docData.records) && docData.records.length > 0) {
       return docData.records[activeRecordIdx] || {};
     }
@@ -1290,7 +1337,7 @@ export default function App() {
             <div className="verification-scroll-container">
               {(() => {
                 const activeFields = getActiveFields();
-                const keysToExclude = ['id', 'created_at', 'updated_at', 'status', 'filename', 'storage_path', 'mime_type', 'confidence_score', 'ocr_raw_text', 'records'];
+                const keysToExclude = ['id', 'created_at', 'updated_at', 'status', 'filename', 'storage_path', 'mime_type', 'confidence_score', 'ocr_raw_text', 'records', '_pipeline_metadata'];
                 const editableFields = Object.entries(activeFields).filter(([key]) => !keysToExclude.includes(key));
                 
                 if (editableFields.length === 0) {
@@ -1298,32 +1345,37 @@ export default function App() {
                 }
                 
                 // Required fields check
-                const requiredFields = [
+                const defaultRequiredFields = [
                   { key: 'full_name', label: 'Customer Name' },
                   { key: 'mobile_number', label: 'Mobile Number' },
                   { key: 'country', label: 'Country' },
                   { key: 'state', label: 'State' }
                 ];
-                const missingRequired = requiredFields.filter(f => !activeFields[f.key] || !activeFields[f.key].toString().trim());
+                
+                let requiredFields = defaultRequiredFields;
+                if (crawledFields && crawledFields.length > 0) {
+                  const requiredKeywords = ['name', 'mobile', 'phone', 'country', 'state'];
+                  requiredFields = crawledFields
+                    .filter(cf => {
+                      if (!cf) return false;
+                      const lbl = (cf.label || '').toLowerCase();
+                      const name = (cf.name || '').toLowerCase();
+                      return lbl.includes('*') || cf.required || requiredKeywords.some(k => lbl.includes(k) || name.includes(k));
+                    })
+                    .map(cf => ({
+                      key: cf.id || cf.name || '',
+                      label: (cf.label || cf.name || cf.id || '').toString().replace('*', '').trim()
+                    }));
+                }
+                
+                const missingRequired = requiredFields.filter(f => {
+                  const val = (activeFields && f.key && activeFields[f.key] !== undefined) ? activeFields[f.key] : '';
+                  return !val || !val.toString().trim();
+                });
 
                 return (
                   <>
-                    {missingRequired.length > 0 && (
-                      <div className="flex flex-col gap-1.5 p-3 rounded border border-red-500/20 bg-red-500/5 text-red-300 mb-2">
-                        <div className="flex items-center gap-2">
-                          <AlertCircle className="w-3.5 h-3.5 text-red-400" />
-                          <span className="text-[9px] font-bold uppercase tracking-wider font-mono">ERP REQUIRED SCHEMAS MISSING</span>
-                        </div>
-                        <p className="text-[10px] text-slate-400 leading-normal">
-                          Missing required elements to satisfy target database constraint. Form filling automation may trigger field validations:
-                        </p>
-                        <ul className="list-disc list-inside text-[10px] font-mono text-red-300 flex flex-wrap gap-x-3">
-                          {missingRequired.map(f => (
-                            <li key={f.key}>{f.label}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
+                    
                     
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {editableFields.map(([key, val]) => {
@@ -1476,7 +1528,7 @@ export default function App() {
                 setCrawledFields([]); // Reset scan
               }}
               className="input-glass text-xs"
-              placeholder="http://example-target-system.com/form"
+              placeholder="Paste your target URL here..."
             />
             <button 
               onClick={crawlTarget}
@@ -1502,6 +1554,26 @@ export default function App() {
               <span>DOM ALIGNED: {crawledFields.length} INPUTS IDENTIFIED</span>
             </div>
             
+            {documentId && (
+              <button 
+                onClick={runTargetGuidedExtraction}
+                disabled={guidedExtracting || crawling}
+                className="px-3 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 disabled:from-slate-800 disabled:to-slate-800 text-white rounded text-[11px] font-bold transition-all flex items-center justify-center gap-1.5 shadow-md border border-violet-500/20 active:scale-95"
+              >
+                {guidedExtracting ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>EXTRACTING TARGET FIELDS...</span>
+                  </>
+                ) : (
+                  <>
+                    <Zap className="w-3.5 h-3.5 text-yellow-300 fill-yellow-300" />
+                    <span>RUN TARGET-GUIDED EXTRACTION</span>
+                  </>
+                )}
+              </button>
+            )}
+            
             {/* Visual alignment grid map */}
             <div className="alignment-grid max-h-[140px] overflow-y-auto">
               {crawledFields.slice(0, 8).map((cf, idx) => (
@@ -1517,6 +1589,17 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {!documentId && (
+              <div className="flex justify-center mt-4 pt-3 border-t border-slate-900/60">
+                <button
+                  onClick={() => setActivePage('documents')}
+                  className="px-6 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 hover:scale-105 active:scale-95 text-white rounded font-bold text-xs shadow-lg transition-all flex items-center gap-1.5"
+                >
+                  <span>👉 PROCEED TO STEP 2: UPLOAD DOCUMENT</span>
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <div className="text-[10px] font-mono text-slate-600 italic p-2 border border-dashed border-slate-900 rounded text-center">
@@ -2778,6 +2861,132 @@ export default function App() {
           {/* Content Pane */}
           <div className="erp-page-content">
             
+            {/* Visual Guided Stepper HUD */}
+            {['dashboard', 'documents', 'verification', 'automation'].includes(activePage) && (
+              <div className="mb-8 p-5 rounded-xl bg-slate-950/30 backdrop-blur-md border border-slate-900/80 shadow-xl">
+                <div className="flex items-center justify-center max-w-4xl mx-auto font-mono text-[9px] uppercase tracking-wider font-bold gap-3">
+                  
+                  {/* Step 1 */}
+                  <button 
+                    onClick={() => setActivePage('automation')}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all border ${
+                      activePage === 'automation'
+                        ? 'bg-blue-500/10 border-blue-500/30 text-blue-400 font-bold scale-105 shadow-[0_0_12px_rgba(59,130,246,0.15)]' 
+                        : crawledFields.length > 0 
+                        ? 'bg-slate-950/40 border-emerald-500/20 text-emerald-400' 
+                        : 'bg-slate-950/40 border-slate-900 text-slate-500'
+                    }`}
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] border transition-all duration-300 ${
+                      crawledFields.length > 0 
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-extrabold shadow-[0_0_8px_rgba(16,185,129,0.4)]' 
+                        : activePage === 'automation'
+                        ? 'bg-blue-500/20 text-blue-400 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.4)] animate-pulse'
+                        : 'bg-slate-900 border-slate-800 text-slate-500'
+                    }`}>
+                      {crawledFields.length > 0 ? '✓' : '1'}
+                    </span>
+                    <span>Scrape Website</span>
+                  </button>
+
+                  {/* Connecting Line 1-2 */}
+                  <div className={`flex-1 h-[2px] rounded transition-all duration-500 ${
+                    crawledFields.length > 0 
+                      ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]' 
+                      : 'bg-slate-900'
+                  }`} />
+
+                  {/* Step 2 */}
+                  <button 
+                    onClick={() => crawledFields.length > 0 && setActivePage('documents')}
+                    disabled={crawledFields.length === 0}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all border ${
+                      activePage === 'documents' 
+                        ? 'bg-blue-500/10 border-blue-500/30 text-blue-400 font-bold scale-105 shadow-[0_0_12px_rgba(59,130,246,0.15)]' 
+                        : documentId 
+                        ? 'bg-slate-950/40 border-emerald-500/20 text-emerald-400' 
+                        : crawledFields.length === 0
+                        ? 'bg-slate-950/20 border-slate-950/20 text-slate-700 cursor-not-allowed'
+                        : 'bg-slate-950/40 border-slate-900 text-slate-400'
+                    }`}
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] border transition-all duration-300 ${
+                      documentId 
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-extrabold shadow-[0_0_8px_rgba(16,185,129,0.4)]' 
+                        : activePage === 'documents'
+                        ? 'bg-blue-500/20 text-blue-400 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.4)] animate-pulse'
+                        : 'bg-slate-900 border-slate-800 text-slate-500'
+                    }`}>
+                      {documentId ? '✓' : '2'}
+                    </span>
+                    <span>Ingest Document</span>
+                  </button>
+
+                  {/* Connecting Line 2-3 */}
+                  <div className={`flex-1 h-[2px] rounded transition-all duration-500 ${
+                    documentId 
+                      ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]' 
+                      : 'bg-slate-900'
+                  }`} />
+
+                  {/* Step 3 */}
+                  <button 
+                    onClick={() => documentId && setActivePage('verification')}
+                    disabled={!documentId}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all border ${
+                      activePage === 'verification' 
+                        ? 'bg-blue-500/10 border-blue-500/30 text-blue-400 font-bold scale-105 shadow-[0_0_12px_rgba(59,130,246,0.15)]' 
+                        : !documentId 
+                        ? 'bg-slate-950/20 border-slate-950/20 text-slate-700 cursor-not-allowed'
+                        : documentData?.corrected_json 
+                        ? 'bg-slate-950/40 border-emerald-500/20 text-emerald-400' 
+                        : 'bg-slate-950/40 border-slate-900 text-slate-400'
+                    }`}
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] border transition-all duration-300 ${
+                      documentData?.corrected_json 
+                        ? 'bg-emerald-500 text-slate-950 border-emerald-400 font-extrabold shadow-[0_0_8px_rgba(16,185,129,0.4)]' 
+                        : activePage === 'verification'
+                        ? 'bg-blue-500/20 text-blue-400 border-blue-500 shadow-[0_0_8px_rgba(59,130,246,0.4)] animate-pulse'
+                        : 'bg-slate-900 border-slate-800 text-slate-500'
+                    }`}>
+                      {documentData?.corrected_json ? '✓' : '3'}
+                    </span>
+                    <span>Verify Data</span>
+                  </button>
+
+                  {/* Connecting Line 3-4 */}
+                  <div className={`flex-1 h-[2px] rounded transition-all duration-500 ${
+                    documentData?.corrected_json 
+                      ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.4)]' 
+                      : 'bg-slate-900'
+                  }`} />
+
+                  {/* Step 4 */}
+                  <button 
+                    onClick={() => documentId && setActivePage('automation')}
+                    disabled={!documentId}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all border ${
+                      activePage === 'automation' && crawledFields.length > 0 && documentId
+                        ? 'bg-purple-500/10 border-purple-500/30 text-purple-400 font-bold scale-105 shadow-[0_0_12px_rgba(168,85,247,0.15)]' 
+                        : !documentId 
+                        ? 'bg-slate-950/20 border-slate-950/20 text-slate-700 cursor-not-allowed'
+                        : 'bg-slate-950/40 border-slate-900 text-slate-400'
+                    }`}
+                  >
+                    <span className={`w-5 h-5 rounded-full flex items-center justify-center text-[9px] border transition-all duration-300 ${
+                      activePage === 'automation' && crawledFields.length > 0 && documentId
+                        ? 'bg-purple-500/20 text-purple-400 border-purple-500 shadow-[0_0_8px_rgba(168,85,247,0.4)] animate-pulse'
+                        : 'bg-slate-900 border-slate-800 text-slate-500'
+                    }`}>
+                      4
+                    </span>
+                    <span>Run Autofill</span>
+                  </button>
+                </div>
+              </div>
+            )}
+            
             {/* 1. DASHBOARD PAGE */}
             {activePage === 'dashboard' && (
               <div className="flex flex-col gap-6">
@@ -2873,6 +3082,17 @@ export default function App() {
             {/* 2. DOCUMENTS PAGE */}
             {activePage === 'documents' && (
               <div className="flex flex-col gap-6">
+                {crawledFields.length === 0 ? (
+                  <div className="px-4 py-3 rounded bg-amber-500/5 border border-amber-500/10 flex items-center gap-3 text-[11px] text-amber-400 font-mono">
+                    <AlertCircle className="w-4 h-4 text-amber-400 animate-pulse" />
+                    <span>💡 TIP: You can crawl a target website first (Step 1) to enable automatic target-guided extraction!</span>
+                  </div>
+                ) : (
+                  <div className="px-4 py-3 rounded bg-emerald-500/5 border border-emerald-500/10 flex items-center gap-3 text-[11px] text-emerald-400 font-mono">
+                    <Check className="w-4 h-4 text-emerald-400" />
+                    <span>✅ TARGET SCHEMA ALIGNED: File upload will extract only the {crawledFields.length} target fields from the website form.</span>
+                  </div>
+                )}
                 <div className="split-panel">
                   
                   {/* Left Side: Ingestor */}
@@ -2909,6 +3129,17 @@ export default function App() {
                     </div>
                   </div>
                 )}
+
+                {selectedDocId && documentData?.status === 'completed' && (
+                  <div className="flex justify-center mt-6">
+                    <button
+                      onClick={() => setActivePage('verification')}
+                      className="px-6 py-2.5 bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 hover:scale-105 active:scale-95 text-white rounded font-bold text-xs shadow-lg transition-all flex items-center gap-2"
+                    >
+                      <span>👉 PROCEED TO STEP 2: VERIFY DATA</span>
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2929,7 +3160,7 @@ export default function App() {
             {activePage === 'automation' && (
               <div className="flex flex-col gap-6">
                 
-                {/* Top: Portal Mapper */}
+                {/* Top: Portal Mapper (Always accessible for Step 1) */}
                 <div className="page-section">
                   <div className="page-section-header">
                     <Globe className="w-4 h-4 text-orange-500" />
@@ -2938,17 +3169,35 @@ export default function App() {
                   {renderMapperPlugin()}
                 </div>
 
-                {/* Middle: Execution controls */}
+                {/* Middle: Execution controls (Locked if no document selected/verified) */}
                 <div className="page-section">
                   <div className="page-section-header">
                     <Play className="w-4 h-4 text-orange-500" />
                     <h3>Execution Engine Control</h3>
                   </div>
-                  {renderExecutionPlugin()}
+                  {!documentId ? (
+                    <div className="glass-panel flex flex-col items-center justify-center p-8 text-center bg-slate-950/20 border border-slate-900 rounded">
+                      <ShieldAlert className="w-8 h-8 text-amber-500 mb-2 animate-pulse" />
+                      <h4 className="text-xs font-mono font-bold text-slate-300">AUTOFILL BLOCKED: SOURCE DATA PENDING</h4>
+                      <p className="text-[10px] text-slate-500 max-w-xs mt-1 leading-normal">
+                        To trigger form injection, you must first ingest a document (Step 2) and verify its details (Step 3).
+                      </p>
+                      {crawledFields.length > 0 && (
+                        <button 
+                          onClick={() => setActivePage('documents')}
+                          className="mt-4 px-4 py-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white rounded text-[9px] font-bold transition-all shadow-md"
+                        >
+                          GO TO STEP 2: UPLOAD DOCUMENT &rarr;
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    renderExecutionPlugin()
+                  )}
                 </div>
 
                 {/* Bottom: Evidence Viewer */}
-                {fillResult && (
+                {fillResult && documentId && (
                   <div className="page-section">
                     <div className="page-section-header">
                       <Monitor className="w-4 h-4 text-purple-500" />
@@ -2957,7 +3206,6 @@ export default function App() {
                     {renderEvidencePlugin()}
                   </div>
                 )}
-
               </div>
             )}
 

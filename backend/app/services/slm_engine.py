@@ -27,7 +27,7 @@ class SLMEngine:
             re.IGNORECASE
         )
 
-    def extract_fields(self, ocr_res: Any, file_hash: Optional[str] = None) -> Dict[str, Any]:
+    def extract_fields(self, ocr_res: Any, file_hash: Optional[str] = None, target_fields: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Uses Ollama SLM, Gemini, or heuristic tabular alignment to extract structured fields dynamically.
         Falls back to rule-based parser if Ollama is unavailable. Uses AI result caching.
@@ -52,9 +52,15 @@ class SLMEngine:
         import hashlib
         repr_hash = file_hash or hashlib.sha256(ocr_text.encode()).hexdigest()
         
-        # Build prompt cache lookup key SHA256(file_hash + prompt_version + model_name)
+        # Incorporate target fields signature into the cache key if present
+        target_fields_sig = ""
+        if target_fields:
+            target_fields_sig = json.dumps(target_fields, sort_keys=True)
+            
+        # Build prompt cache lookup key SHA256(file_hash + prompt_version + model_name + target_fields_sig)
         import hashlib
-        ai_cache_key = f"ai:result:{hashlib.sha256((repr_hash + prompt_version + self.model).encode()).hexdigest()}"
+        cache_seed = repr_hash + prompt_version + self.model + target_fields_sig
+        ai_cache_key = f"ai:result:{hashlib.sha256(cache_seed.encode()).hexdigest()}"
         cached_ai = cache_service.get(ai_cache_key)
         if cached_ai:
             append_admin_log("deduplication", "INFO", f"AI Cache Hit: Restored extraction values from cache key {ai_cache_key[:16]}...")
@@ -68,8 +74,8 @@ class SLMEngine:
                 # Neutralize by replacing the offending phrases with a warning block
                 ocr_text = self.injection_regex.sub("[RESTRICTED SECURE VALUE BLOCKED]", ocr_text)
             
-        # Try heuristic table extraction first if words are present
-        if words:
+        # Try heuristic table extraction first if words are present and we are NOT in target fields mode
+        if words and not target_fields:
             table_data = self._extract_table_records(words, ocr_text)
             if table_data and "records" in table_data and len(table_data["records"]) > 0:
                 print(f"Table ingestion active: Extracted {len(table_data['records'])} rows.")
@@ -85,39 +91,69 @@ class SLMEngine:
                 return table_data
 
         # --- Prompt Cache ---
-        default_system = (
-            "You are an advanced AI document parser with high reasoning capability. "
-            "Your task is to analyze the provided OCR text and extract structured fields with extreme accuracy. "
-            "Handle complex layouts, nested tables, and multi-line values correctly. "
-            "Correct obvious OCR typos based on context (e.g. 'O' to '0' in dates or codes). "
-            "Do not hallucinate data; if a field is not present, omit it."
-        )
-        default_extraction = (
-            "Identify and extract key entities, including but not limited to:\n"
-            "- Entities: buyer/customer full name, vendor/company name, address, country, state, district, pin_code, mobile_number, email.\n"
-            "- Tax & IDs: PAN number, GSTIN number.\n"
-            "- Invoice/Bill Details: invoice_number, invoice_date, total_amount, shipping_charges, discount.\n"
-            "- Line Items (aggregate or dominant if flat): item_description, quantity, unit_price, hsn_code.\n"
-            "- Industry Specific (if applicable): gross_weight, net_weight, purity, making_charges, wastage, rate_per_gram, stone_weight, patient_name, doctor_name, admission_date, discharge_date, room_number, medicine_cost, insurance_provider, pnr_no, journey_date, source_location, destination_location, seat_number, vehicle_no.\n"
-            "- Jewelry & Retail GRNs: purchase_rate, net_weight, others_value, others_weight, stone_weight, gross_weight, bag_weight, grn_date, purchase_order_number, purchase_order_date, vendor_name, ordered_by, reference_id, stone_rate, making_charges, rate_per_gram, total_amount, total_amount_in_words, remarks, igst, round_off, branch_name, material_type, purity, material_price_per_gram, category, sub_category, type, quantity, total_weight.\n\n"
-            "CRITICAL INSTRUCTIONS:\n"
-            "1. Extract nested address components into separate fields ('state', 'district', 'pin_code') rather than combining them.\n"
-            "2. For mathematical values (total amount, quantity, unit price), ensure they match the invoice logic.\n"
-            "3. Format dates cleanly if possible.\n"
-            "4. Return a SINGLE FLAT JSON object. Use strict lowercase snake_case for keys.\n"
-            "5. OUTPUT ONLY VALID JSON. Do not include markdown code blocks, thoughts, or explanations."
-        )
-        
-        system_prompt = cache_service.get_prompt("system", default_system)
-        extraction_prompt = cache_service.get_prompt("extraction", default_extraction)
-        
-        # Append our critical table rows warning to the extraction prompt
-        table_warning = (
-            "\nCRITICAL: If the document contains a table or list of items/records, you MUST extract EVERY SINGLE ROW/ITEM in the table without combining, summarizing, or omitting any rows. "
-            "Extract all columns for each row (such as material_type, purity, quantity, net_weight, gross_weight, making_charges, rate_per_gram, stone_weight, total_amount) into separate objects inside the 'records' array. "
-            "Do not miss any line items from the table. If a row lacks some fields, include the other fields that are present."
-        )
-        extraction_prompt += table_warning
+        if target_fields:
+            fields_desc = []
+            for tf in target_fields:
+                field_id = tf.get("id") or tf.get("name") or ""
+                field_label = tf.get("label") or ""
+                field_placeholder = tf.get("placeholder") or ""
+                field_type = tf.get("type") or "text"
+                desc = f"- key: '{field_id}' | Label: '{field_label}'"
+                if field_placeholder:
+                    desc += f" (Hint/Placeholder: '{field_placeholder}')"
+                desc += f" [Type: {field_type}]"
+                fields_desc.append(desc)
+            
+            fields_str = "\n".join(fields_desc)
+            
+            system_prompt = (
+                "You are an advanced AI document parser with high reasoning capability. "
+                "Your task is to analyze the provided OCR text and extract ONLY the values for the requested fields with extreme accuracy. "
+                "Do not extract or include any other fields."
+            )
+            
+            extraction_prompt = (
+                "Extract values for the following fields from the OCR text:\n"
+                f"{fields_str}\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Return a SINGLE FLAT JSON object where the keys are EXACTLY the key names specified above.\n"
+                "2. If a field is not present in the document, set its value to null.\n"
+                "3. OUTPUT ONLY VALID JSON. Do not include markdown code blocks, thoughts, or explanations."
+            )
+        else:
+            default_system = (
+                "You are an advanced AI document parser with high reasoning capability. "
+                "Your task is to analyze the provided OCR text and extract structured fields with extreme accuracy. "
+                "Handle complex layouts, nested tables, and multi-line values correctly. "
+                "Correct obvious OCR typos based on context (e.g. 'O' to '0' in dates or codes). "
+                "Do not hallucinate data; if a field is not present, omit it."
+            )
+            default_extraction = (
+                "Identify and extract key entities, including but not limited to:\n"
+                "- Entities: buyer/customer full name, vendor/company name, address, country, state, district, pin_code, mobile_number, email.\n"
+                "- Tax & IDs: PAN number, GSTIN number.\n"
+                "- Invoice/Bill Details: invoice_number, invoice_date, total_amount, shipping_charges, discount.\n"
+                "- Line Items (aggregate or dominant if flat): item_description, quantity, unit_price, hsn_code.\n"
+                "- Industry Specific (if applicable): gross_weight, net_weight, purity, making_charges, wastage, rate_per_gram, stone_weight, patient_name, doctor_name, admission_date, discharge_date, room_number, medicine_cost, insurance_provider, pnr_no, journey_date, source_location, destination_location, seat_number, vehicle_no.\n"
+                "- Jewelry & Retail GRNs: purchase_rate, net_weight, others_value, others_weight, stone_weight, gross_weight, bag_weight, grn_date, purchase_order_number, purchase_order_date, vendor_name, ordered_by, reference_id, stone_rate, making_charges, rate_per_gram, total_amount, total_amount_in_words, remarks, igst, round_off, branch_name, material_type, purity, material_price_per_gram, category, sub_category, type, quantity, total_weight.\n\n"
+                "CRITICAL INSTRUCTIONS:\n"
+                "1. Extract nested address components into separate fields ('state', 'district', 'pin_code') rather than combining them.\n"
+                "2. For mathematical values (total amount, quantity, unit price), ensure they match the invoice logic.\n"
+                "3. Format dates cleanly if possible.\n"
+                "4. Return a SINGLE FLAT JSON object. Use strict lowercase snake_case for keys.\n"
+                "5. OUTPUT ONLY VALID JSON. Do not include markdown code blocks, thoughts, or explanations."
+            )
+            
+            system_prompt = cache_service.get_prompt("system", default_system)
+            extraction_prompt = cache_service.get_prompt("extraction", default_extraction)
+            
+            # Append our critical table rows warning to the extraction prompt
+            table_warning = (
+                "\nCRITICAL: If the document contains a table or list of items/records, you MUST extract EVERY SINGLE ROW/ITEM in the table without combining, summarizing, or omitting any rows. "
+                "Extract all columns for each row (such as material_type, purity, quantity, net_weight, gross_weight, making_charges, rate_per_gram, stone_weight, total_amount) into separate objects inside the 'records' array. "
+                "Do not miss any line items from the table. If a row lacks some fields, include the other fields that are present."
+            )
+            extraction_prompt += table_warning
         
         prompt = (
             f"{system_prompt}\n"
@@ -183,6 +219,14 @@ class SLMEngine:
                         result_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
                         data = self._clean_and_load_json(result_text)
                         result_data = self._post_process_data(data, ocr_text)
+                    # If target fields were requested, verify if local SLM actually extracted them.
+                    # If the local LLM failed and returned invalid/unrelated keys (like :r15:), overlay regex fallback.
+                    if target_fields and isinstance(result_data, dict):
+                        matched_keys = [tf for tf in target_fields if (tf.get("id") in result_data or tf.get("name") in result_data)]
+                        if len(matched_keys) == 0:
+                            print("Ollama returned invalid keys. Overlaying rule-based regex fallback.")
+                            fallback_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
+                            result_data = {**result_data, **fallback_data}
                     else:
                         status_code = response.status_code if response else "No Response"
                         print(f"Gemini multimodal API returned status code {status_code}. Falling back to standard Gemini.")
@@ -229,6 +273,14 @@ class SLMEngine:
                         result_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
                         data = self._clean_and_load_json(result_text)
                         result_data = self._post_process_data(data, ocr_text)
+                    # If target fields were requested, verify if local SLM actually extracted them.
+                    # If the local LLM failed and returned invalid/unrelated keys (like :r15:), overlay regex fallback.
+                    if target_fields and isinstance(result_data, dict):
+                        matched_keys = [tf for tf in target_fields if (tf.get("id") in result_data or tf.get("name") in result_data)]
+                        if len(matched_keys) == 0:
+                            print("Ollama returned invalid keys. Overlaying rule-based regex fallback.")
+                            fallback_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
+                            result_data = {**result_data, **fallback_data}
                     else:
                         status_code = response.status_code if response else "No Response"
                         print(f"Gemini standard API returned status code {status_code}. Falling back.")
@@ -271,18 +323,26 @@ class SLMEngine:
                     result_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
                     data = json.loads(result_text)
                     result_data = self._post_process_data(data, ocr_text)
+                    # If target fields were requested, verify if local SLM actually extracted them.
+                    # If the local LLM failed and returned invalid/unrelated keys (like :r15:), overlay regex fallback.
+                    if target_fields and isinstance(result_data, dict):
+                        matched_keys = [tf for tf in target_fields if (tf.get("id") in result_data or tf.get("name") in result_data)]
+                        if len(matched_keys) == 0:
+                            print("Ollama returned invalid keys. Overlaying rule-based regex fallback.")
+                            fallback_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
+                            result_data = {**result_data, **fallback_data}
                 else:
                     status_code = response.status_code if response else "No Response"
                     print(f"Gemini standard API returned status code {status_code}. Falling back.")
             except Exception as gemini_err:
                 print(f"Gemini standard API call failed ({gemini_err}). Falling back.")
 
-        # 3. Fallback: Try heuristic table extraction first if words are present
-        if words:
+        # 3. Fallback: Try heuristic table extraction first if words are present and target_fields is not used
+        if words and not target_fields:
             table_data = self._extract_table_records(words, ocr_text)
             if table_data and "records" in table_data and len(table_data["records"]) > 0:
                 print(f"Table ingestion active (Fallback): Extracted {len(table_data['records'])} rows.")
-                flat_data = self._regex_fallback_extract(ocr_text)
+                flat_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
                 flat_data["records"] = table_data["records"]
                 return self._post_process_data(flat_data, ocr_text)
 
@@ -304,11 +364,19 @@ class SLMEngine:
                     result_json = response.json().get("response", "{}")
                     data = json.loads(result_json)
                     result_data = self._post_process_data(data, ocr_text)
+                    # If target fields were requested, verify if local SLM actually extracted them.
+                    # If the local LLM failed and returned invalid/unrelated keys (like :r15:), overlay regex fallback.
+                    if target_fields and isinstance(result_data, dict):
+                        matched_keys = [tf for tf in target_fields if (tf.get("id") in result_data or tf.get("name") in result_data)]
+                        if len(matched_keys) == 0:
+                            print("Ollama returned invalid keys. Overlaying rule-based regex fallback.")
+                            fallback_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
+                            result_data = {**result_data, **fallback_data}
             except Exception as e:
                 print(f"Ollama SLM inference failed ({e}). Falling back to rule-based heuristics.")
                 
         if not result_data:
-            result_data = self._post_process_data(self._regex_fallback_extract(ocr_text), ocr_text)
+            result_data = self._post_process_data(self._regex_fallback_extract(ocr_text, target_fields=target_fields), ocr_text)
 
         # Attach pipeline version metadata (Requirement 11)
         if isinstance(result_data, dict) and len(result_data) > 0:
@@ -321,11 +389,128 @@ class SLMEngine:
                     "pipeline_version": "Pipeline v2"
                 }
 
+        # Resolve extracted human keys to target fields dynamically
+        if target_fields and isinstance(result_data, dict):
+            result_data = self._resolve_target_fields(result_data, target_fields)
+
         # Cache the successfully post-processed data (30 days TTL) (Point 5)
         cache_service.set(ai_cache_key, result_data, expire_seconds=30 * 86400)
         return result_data
 
-    def _regex_fallback_extract(self, text: str) -> Dict[str, Any]:
+    def _resolve_target_fields(self, result_data: Dict[str, Any], target_fields: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Dynamically maps human-friendly extracted keys (like full_name, mobile_number) 
+        to the target website input field IDs (like :r12:, :r15:) based on labels/names.
+        """
+        resolved = {}
+        if "_pipeline_metadata" in result_data:
+            resolved["_pipeline_metadata"] = result_data["_pipeline_metadata"]
+            
+        for tf in target_fields:
+            tf_id = tf.get("id") or tf.get("name")
+            if not tf_id:
+                continue
+                
+            tf_label = (tf.get("label") or "").strip().lower()
+            tf_name = (tf.get("name") or "").strip().lower()
+            tf_id_clean = tf_id.strip().lower()
+            
+            # Direct match check (casing/id match)
+            direct_match = None
+            for k, v in result_data.items():
+                if k.lower() in (tf_id_clean, tf_name, tf_label):
+                    direct_match = v
+                    break
+            if direct_match is not None:
+                resolved[tf_id] = direct_match
+                continue
+                
+            # Fuzzy label matching
+            matched_val = None
+            
+            # Customer / Full Name
+            if "name" in tf_label or "name" in tf_name:
+                if "father" in tf_label or "father" in tf_name:
+                    matched_val = result_data.get("father_name") or result_data.get("father name")
+                elif "vendor" in tf_label or "vendor" in tf_name or "supplier" in tf_label:
+                    matched_val = result_data.get("vendor_name") or result_data.get("vendor")
+                else:
+                    matched_val = (
+                        result_data.get("full_name") or 
+                        result_data.get("customer_name") or 
+                        result_data.get("name") or 
+                        result_data.get("customer name")
+                    )
+                    
+            # Phone / Mobile Number
+            elif any(x in tf_label or x in tf_name for x in ["phone", "mobile", "contact", "tel"]):
+                matched_val = (
+                    result_data.get("mobile_number") or 
+                    result_data.get("phone") or 
+                    result_data.get("phone_number") or 
+                    result_data.get("mobile")
+                )
+                
+            # Email
+            elif "email" in tf_label or "email" in tf_name or "mail" in tf_label or "mail" in tf_name:
+                matched_val = result_data.get("email") or result_data.get("email_address")
+                
+            # Address
+            elif "address" in tf_label or "address" in tf_name or "residential" in tf_label or "residence" in tf_label:
+                matched_val = result_data.get("address") or result_data.get("residential") or result_data.get("billing_address")
+                
+            # Country
+            elif "country" in tf_label or "country" in tf_name:
+                matched_val = result_data.get("country")
+                
+            # State
+            elif "state" in tf_label or "state" in tf_name:
+                matched_val = result_data.get("state")
+                
+            # District
+            elif "district" in tf_label or "district" in tf_name:
+                matched_val = result_data.get("district")
+                
+            # Pin code
+            elif any(x in tf_label or x in tf_name for x in ["pin", "zip", "postal"]):
+                matched_val = (
+                    result_data.get("pin_code") or 
+                    result_data.get("pincode") or 
+                    result_data.get("zip") or 
+                    result_data.get("postal_code")
+                )
+                
+            # PAN No
+            elif "pan" in tf_label or "pan" in tf_name:
+                matched_val = result_data.get("pan_no") or result_data.get("pan")
+                
+            # GSTIN No
+            elif "gst" in tf_label or "gst" in tf_name or "gstin" in tf_label or "gstin" in tf_name:
+                matched_val = result_data.get("gstin_no") or result_data.get("gst") or result_data.get("gstin")
+                
+            # School
+            elif "school" in tf_label or "school" in tf_name:
+                matched_val = result_data.get("school")
+                
+            # College
+            elif "college" in tf_label or "college" in tf_name:
+                matched_val = result_data.get("college")
+                
+            if matched_val is not None:
+                resolved[tf_id] = matched_val
+                
+        # Copy direct matching keys from original results to preserve LLM raw output
+        for tf in target_fields:
+            tf_id = tf.get("id") or tf.get("name")
+            if tf_id and tf_id not in resolved:
+                for k, v in result_data.items():
+                    if k.lower() == tf_id.lower():
+                        resolved[tf_id] = v
+                        break
+                        
+        return resolved
+
+    def _regex_fallback_extract(self, text: str, target_fields: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
         """
         Dynamically extracts all key-value pairs from the OCR text block.
         Works line-by-line to parse both inline (key: value) and multi-line layouts.
@@ -333,15 +518,30 @@ class SLMEngine:
         data = {}
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         
+        # Create a mapping from clean label/id/name to the original target key
+        label_to_target_key = {}
+        if target_fields:
+            for tf in target_fields:
+                target_key = tf.get("id") or tf.get("name") or ""
+                if not target_key:
+                    continue
+                fid = tf.get("id") or ""
+                fname = tf.get("name") or ""
+                flabel = tf.get("label") or ""
+                for val in [fid, fname, flabel]:
+                    val_clean = re.sub(r'[^a-zA-Z0-9\s]', '', val).strip().lower()
+                    if val_clean:
+                        label_to_target_key[val_clean] = target_key
+        
         # Lists of words that represent known labels to help with parsing
         # (This helps check if a line is a label or a value)
         known_labels = [
-            "name", "full name", "client", "patient", "employee", "customer", "customer name", "buyer", "buyer name", "sold to", "bill to", "billed to", "recipient", "purchaser", "consignee", "consignee name", "client name",
+            "name", "full name", "client", "patient", "employee", "customer", "customer name", "buyer", "buyer name", "sold to", "bill to", "billed to", "recipient", "purchaser", "consignee", "consignee name", "client name", "father name", "fathers name",
             "email", "mail", "e-mail", "email address", "email id", "mail id", "mail address", "user email",
             "phone", "tel", "telephone", "mobile", "contact", "phone number", "phone no", "mobile no", "contact no", "ph no", "tel no", "cell", "cell no", "cellphone",
             "date of birth", "dob", "birth date", "birthdate", "birthday",
             "id", "id number", "license", "passport", "ssn", "identity", "identity number", "document id",
-            "address", "addr", "location", "residence", "street", "street address", "billing address", "shipping address", "buyer address", "customer address", "consignee address",
+            "address", "addr", "location", "residence", "residential", "residential address", "street", "street address", "billing address", "shipping address", "buyer address", "customer address", "consignee address",
             "website", "web", "url", "web address",
             "linkedin", "social", "social media", "twitter", "facebook",
             "pan", "pan no", "pan card", "gstin", "gstin no", "gst", "gst no", "gst num", "gst number", "tax id", "tax no", "tax number", "tin", "tin no", "urn", "urn no", "registration no", "reg no",
@@ -385,6 +585,9 @@ class SLMEngine:
         ]
 
         def clean_key(raw_key: str) -> str:
+            clean = re.sub(r'[^a-zA-Z0-9\s]', '', raw_key).strip().lower()
+            if target_fields and clean in label_to_target_key:
+                return label_to_target_key[clean]
             return self._clean_key_helper(raw_key)
 
         def is_label(line_text: str) -> bool:
@@ -400,12 +603,12 @@ class SLMEngine:
             words = clean.split()
             if len(words) > 4:
                 return False
-            # If the clean line is exactly one of our known labels, it's a label
-            if clean in known_labels:
+            # If the clean line is exactly one of our known labels or custom target fields, it's a label
+            if clean in known_labels or clean in label_to_target_key:
                 return True
             # Or if it contains specific label phrases (excluding generic value words)
             for w in words:
-                if w in known_labels and w not in ["street", "town", "province", "code", "mail", "district", "state", "city", "country"]:
+                if (w in known_labels and w not in ["street", "town", "province", "code", "mail", "district", "state", "city", "country"]) or (w in label_to_target_key):
                     return True
             return False
 
@@ -487,6 +690,24 @@ class SLMEngine:
                         data[k] = separator.join(val_parts)
                     i = j - 1
             i += 1
+
+        # Run FieldMappingEngine mapping on raw keys to dynamically map to target fields
+        if target_fields and len(data) > 0:
+            try:
+                from .mapping_engine import FieldMappingEngine
+                mapping_engine = FieldMappingEngine()
+                mapped_selectors = mapping_engine.map_fields(data, target_fields)
+                
+                mapped_data = {}
+                for raw_k, val in data.items():
+                    if raw_k in mapped_selectors and mapped_selectors[raw_k]:
+                        target_sel = mapped_selectors[raw_k]
+                        mapped_data[target_sel] = val
+                    else:
+                        mapped_data[raw_k] = val
+                data = mapped_data
+            except Exception as map_err:
+                print(f"Regex fallback mapping failed: {map_err}")
 
         return data
 

@@ -2,7 +2,7 @@ import os
 import shutil
 import hashlib
 from datetime import datetime
-from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks, HTTPException, Form
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List, Optional
@@ -10,7 +10,7 @@ from ..database import get_db
 from ..config import settings
 from ..models.document import DBModelDocument
 from ..models.mapping import DBModelMappingMemory
-from ..schemas.document import DocumentResponse, DocumentReview
+from ..schemas.document import DocumentResponse, DocumentReview, ExtractForTargetRequest
 from ..services.preprocessor import ImagePreprocessor
 from ..services.ocr_engine import OCREngine
 from ..services.slm_engine import SLMEngine
@@ -73,7 +73,7 @@ def finalize_document_processing(doc_id: str, status: str, extracted_json: Optio
     except Exception as wh_err:
         print(f"Failed to dispatch webhook for doc {doc.id}: {wh_err}")
 
-def process_document_task(doc_id: str, db_session_maker):
+def process_document_task(doc_id: str, db_session_maker, target_url: Optional[str] = None, target_fields: Optional[List[Dict[str, Any]]] = None):
     """Background task to run OpenCV + OCR + SLM pipeline."""
     db = db_session_maker()
     try:
@@ -81,6 +81,15 @@ def process_document_task(doc_id: str, db_session_maker):
         doc = db.query(DBModelDocument).filter(DBModelDocument.id == doc_id).first()
         if not doc:
             return
+            
+        # If target_fields is not provided but target_url is, crawl the fields first
+        if not target_fields and target_url:
+            from ..services.automation_engine import PlaywrightAutomationEngine
+            automation_engine = PlaywrightAutomationEngine()
+            try:
+                target_fields = automation_engine.inspect_page_forms(target_url)
+            except Exception as crawl_err:
+                print(f"Failed to crawl target URL {target_url} during background processing: {crawl_err}")
             
         # Simulate Virus scanning quarantine phase
         from .admin import append_admin_log, load_admin_data
@@ -232,7 +241,7 @@ def process_document_task(doc_id: str, db_session_maker):
             db.commit()
             
             cache_service.set(f"job:{doc_id}:stage", "extraction", expire_seconds=3600)
-            extracted_data = slm_engine.extract_fields(ocr_res)
+            extracted_data = slm_engine.extract_fields(ocr_res, target_fields=target_fields)
             
             conf = 0.0
             if extracted_data:
@@ -275,7 +284,7 @@ def process_document_task(doc_id: str, db_session_maker):
                     db.commit()
                     
                     cache_service.set(f"job:{doc_id}:stage", "extraction", expire_seconds=3600)
-                    extracted_data = slm_engine.extract_fields(ocr_res, file_hash=file_hash)
+                    extracted_data = slm_engine.extract_fields(ocr_res, file_hash=file_hash, target_fields=target_fields)
                     
                     non_null_count = sum(1 for v in extracted_data.values() if v is not None)
                     conf = non_null_count / len(extracted_data) if len(extracted_data) > 0 else 0.0
@@ -314,7 +323,8 @@ def process_document_task(doc_id: str, db_session_maker):
                         cache_service.set(f"job:{doc_id}:stage", "extraction", expire_seconds=3600)
                         extracted_page_data = slm_engine.extract_fields(
                             ocr_res, 
-                            file_hash=f"{file_hash}_page_{idx+1}" if file_hash else None
+                            file_hash=f"{file_hash}_page_{idx+1}" if file_hash else None,
+                            target_fields=target_fields
                         )
                         
                         # Merge records array
@@ -384,7 +394,7 @@ def process_document_task(doc_id: str, db_session_maker):
         
         # 4. SLM Structured Extraction
         cache_service.set(f"job:{doc_id}:stage", "extraction", expire_seconds=3600)
-        extracted_data = slm_engine.extract_fields(ocr_res, file_hash=file_hash)
+        extracted_data = slm_engine.extract_fields(ocr_res, file_hash=file_hash, target_fields=target_fields)
         
         # Calculate confidence score
         conf = 0.0
@@ -413,6 +423,8 @@ DEDUPLICATION_CACHE = {}
 def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    target_url: Optional[str] = Form(None),
+    target_fields: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     import hashlib
@@ -492,8 +504,16 @@ def upload_document(
     append_admin_log("security", "INFO", f"Ingested '{filename}'. Scheduling ClamAV quarantine virus scan...")
 
     # Trigger background pipeline
+    import json
+    parsed_target_fields = None
+    if target_fields:
+        try:
+            parsed_target_fields = json.loads(target_fields)
+        except Exception as e:
+            print(f"Failed to parse target_fields JSON: {e}")
+            
     from ..database import SessionLocal
-    background_tasks.add_task(process_document_task, db_doc.id, SessionLocal)
+    background_tasks.add_task(process_document_task, db_doc.id, SessionLocal, target_url, parsed_target_fields)
     
     return db_doc
 
@@ -504,13 +524,15 @@ def upload_document(
 def upload_document_job(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
+    target_url: Optional[str] = Form(None),
+    target_fields: Optional[str] = Form(None),
     db: Session = Depends(get_db)
 ):
     """
     Asynchronously uploads file, returns job ID immediately, and runs parsing in the background.
     """
     # Simply reuse upload logic, but return a lighter job response payload
-    doc = upload_document(background_tasks, file, db)
+    doc = upload_document(background_tasks, file, target_url, target_fields, db)
     return {
         "job_id": doc.id,
         "status": doc.status,
@@ -606,6 +628,18 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
     # Invalidate document cache (Point 14)
     cache_service.delete(f"doc:result:{doc_id}")
     
+    # Calculate hash to delete from duplicate cache
+    try:
+        import hashlib
+        if doc.storage_path and os.path.exists(doc.storage_path):
+            with open(doc.storage_path, "rb") as f:
+                f_bytes = f.read()
+            f_hash = hashlib.sha256(f_bytes).hexdigest()
+            cache_service.delete(f"dup:hash:{f_hash}")
+            cache_service.delete(f"ocr:{f_hash}")
+    except Exception as e:
+        print(f"Failed to clear duplicate hash cache: {e}")
+    
     # Try deleting physical files
     try:
         if doc.storage_path and os.path.exists(doc.storage_path):
@@ -696,3 +730,137 @@ def review_document(
 
     db.refresh(doc)
     return doc
+
+@router.post("/{doc_id}/extract-for-target", response_model=DocumentResponse)
+def extract_for_target(
+    doc_id: str,
+    request: ExtractForTargetRequest,
+    db: Session = Depends(get_db)
+):
+    doc = db.query(DBModelDocument).filter(DBModelDocument.id == doc_id).first()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+        
+    ocr_raw_text = doc.ocr_raw_text
+    
+    target_fields = request.target_fields
+    target_url = request.target_url
+    
+    # 1. Crawl fields if not provided but target_url is
+    if not target_fields and target_url:
+        from ..services.automation_engine import PlaywrightAutomationEngine
+        automation_engine = PlaywrightAutomationEngine()
+        try:
+            target_fields = automation_engine.inspect_page_forms(target_url)
+        except Exception as crawl_err:
+            raise HTTPException(status_code=500, detail=f"Failed to crawl target webpage: {str(crawl_err)}")
+            
+    if not target_fields:
+        raise HTTPException(status_code=400, detail="Either target_fields list or target_url must be provided.")
+        
+    # 2. Run target-guided extraction
+    import os
+    ext = os.path.splitext(doc.filename.lower())[1]
+    is_excel = ext.startswith(".xls") or ext in [".ods", ".xslv", ".xlsv"]
+    is_csv = ext == ".csv"
+    
+    if is_excel or is_csv:
+        import pandas as pd
+        import re
+        raw_path = doc.storage_path
+        if not os.path.isabs(raw_path):
+            raw_path = os.path.join(settings.UPLOAD_DIR, os.path.basename(raw_path))
+            
+        try:
+            if is_csv:
+                df = pd.read_csv(raw_path)
+            else:
+                df = pd.read_excel(raw_path)
+                
+            df = df.where(pd.notnull(df), None)
+            
+            # Map column headers to target field IDs
+            from ..services.mapping_engine import FieldMappingEngine
+            mapping_engine = FieldMappingEngine()
+            
+            col_map = {}
+            for col in df.columns:
+                col_clean = re.sub(r'[^a-zA-Z0-9\s_]', '', str(col)).strip().lower().replace(' ', '_')
+                matched_fid = None
+                for tf in target_fields:
+                    fid = tf.get("id") or tf.get("name")
+                    flabel = tf.get("label") or ""
+                    if fid.lower() == col_clean or flabel.lower() == str(col).lower():
+                        matched_fid = fid
+                        break
+                        
+                if not matched_fid:
+                    best_fid = None
+                    best_score = 0.0
+                    for tf in target_fields:
+                        fid = tf.get("id") or tf.get("name")
+                        flabel = tf.get("label") or ""
+                        score = mapping_engine._get_string_match_score(col_clean, flabel)
+                        if score > best_score:
+                            best_score = score
+                            best_fid = fid
+                    if best_score >= 0.5:
+                        matched_fid = best_fid
+                        
+                if matched_fid:
+                    col_map[col] = matched_fid
+            
+            records = []
+            for _, row in df.iterrows():
+                rec = {}
+                for col, val in row.items():
+                    key = col_map.get(col, col)
+                    rec[key] = str(val) if val is not None else ""
+                records.append(rec)
+                
+            doc.extracted_json = {"records": records}
+            doc.status = "completed"
+            doc.confidence_score = 1.0
+            db.commit()
+            cache_service.delete(f"doc:result:{doc_id}")
+            db.refresh(doc)
+            return doc
+        except Exception as csv_err:
+            raise HTTPException(status_code=500, detail=f"Failed to process spreadsheet headers: {str(csv_err)}")
+
+    # For text/PDF/images, ensure ocr_raw_text exists
+    if not ocr_raw_text:
+        raise HTTPException(status_code=400, detail="Document has not been processed or has no OCR text. Please process/upload it first.")
+        
+    ocr_res = {"raw_text": ocr_raw_text}
+    
+    # Calculate file_hash if possible
+    import hashlib
+    file_hash = hashlib.sha256(ocr_raw_text.encode()).hexdigest()
+    
+    try:
+        extracted_data = slm_engine.extract_fields(
+            ocr_res, 
+            file_hash=file_hash, 
+            target_fields=target_fields
+        )
+        
+        # 3. Update document in DB
+        doc.status = "completed"
+        doc.extracted_json = extracted_data
+        doc.corrected_json = None # Reset review/corrected json for the new schema
+        
+        # Calculate confidence score
+        non_null_count = sum(1 for v in extracted_data.values() if v is not None)
+        conf = non_null_count / len(extracted_data) if len(extracted_data) > 0 else 1.0
+        doc.confidence_score = float(conf)
+        
+        db.commit()
+        
+        # 4. Invalidate document cache
+        cache_service.delete(f"doc:result:{doc_id}")
+        
+        db.refresh(doc)
+        return doc
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Target-guided extraction failed: {str(e)}")

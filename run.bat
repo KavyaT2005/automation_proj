@@ -57,7 +57,7 @@ if exist ".venv" (
 ) else (
     call venv\Scripts\activate
 )
-python -c "import fastapi, uvicorn, pydantic, sqlalchemy, cv2, numpy, easyocr, sentence_transformers, playwright, requests, psycopg2, torch, pydantic_settings" >nul 2>&1
+python -c "import fastapi, uvicorn, pydantic, sqlalchemy, cv2, numpy, easyocr, sentence_transformers, playwright, requests, psycopg2, torch, pydantic_settings, pypdfium2, docx, pandas, openpyxl" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [*] Installing python dependencies [this may take a few minutes]...
     pip install -r backend\requirements.txt
