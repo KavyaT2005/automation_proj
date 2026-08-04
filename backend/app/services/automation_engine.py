@@ -625,7 +625,8 @@ class PlaywrightAutomationEngine:
         extracted_data: Dict[str, Any], 
         mapping_engine: Any, 
         db: Any, 
-        screenshot_path: str
+        screenshot_path: str,
+        auth_cookies: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Navigates to url, logs in if needed, scans form fields, maps them dynamically, 
@@ -645,11 +646,15 @@ class PlaywrightAutomationEngine:
             browser = p.chromium.launch(headless=run_headless)
             
             if has_auth:
-                print(f"Loading saved session cookies from {auth_path}...")
+                print(f"Loading saved session state from {auth_path}...")
                 context = browser.new_context(storage_state=auth_path)
             else:
-                print("No active login session found (auth.json missing). Launching browser to capture session...")
+                print("No active login session state found on disk. Launching browser...")
                 context = browser.new_context()
+                
+            if auth_cookies:
+                print(f"Injecting {len(auth_cookies)} authentication cookies into the browser context...")
+                context.add_cookies(auth_cookies)
                 
             page = context.new_page()
             
@@ -1024,7 +1029,8 @@ class PlaywrightAutomationEngine:
         records: List[Dict[str, Any]], 
         mapping_engine: Any, 
         db: Any, 
-        screenshot_dir: str
+        screenshot_dir: str,
+        auth_cookies: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Loops through all records, navigating to the form URL for each record,
@@ -1039,10 +1045,15 @@ class PlaywrightAutomationEngine:
             browser = p.chromium.launch(headless=run_headless)
             
             if has_auth:
-                print(f"Loading saved session cookies from {auth_path}...")
+                print(f"Loading saved session state from {auth_path}...")
                 context = browser.new_context(storage_state=auth_path)
             else:
+                print("No active login session state found on disk. Launching browser...")
                 context = browser.new_context()
+                
+            if auth_cookies:
+                print(f"Injecting {len(auth_cookies)} authentication cookies into the browser context...")
+                context.add_cookies(auth_cookies)
                 
             page = context.new_page()
             

@@ -23,10 +23,12 @@ class FillRequest(BaseModel):
     document_id: str
     target_url: str
     record_index: Optional[int] = None
+    auth_cookies: Optional[List[Dict[str, Any]]] = None
 
 class BulkFillRequest(BaseModel):
     document_id: str
     target_url: str
+    auth_cookies: Optional[List[Dict[str, Any]]] = None
 
 @router.post("/crawl", response_model=List[Dict[str, Any]])
 def crawl_web_fields(request: CrawlRequest):
@@ -91,7 +93,8 @@ def fill_web_form(request: FillRequest, db: Session = Depends(get_db)):
             extracted_data=extracted_data,
             mapping_engine=mapping_engine,
             db=db,
-            screenshot_path=screenshot_path
+            screenshot_path=screenshot_path,
+            auth_cookies=request.auth_cookies
         )
         
         filled_list = fill_res.get("filled") or fill_res.get("filled_fields") or []
@@ -150,7 +153,8 @@ def fill_web_form_bulk(request: BulkFillRequest, db: Session = Depends(get_db)):
             records=records,
             mapping_engine=mapping_engine,
             db=db,
-            screenshot_dir=screenshot_dir
+            screenshot_dir=screenshot_dir,
+            auth_cookies=request.auth_cookies
         )
         
         return {
