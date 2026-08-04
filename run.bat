@@ -60,7 +60,7 @@ if exist ".venv" (
 python -c "import fastapi, uvicorn, pydantic, sqlalchemy, cv2, numpy, easyocr, sentence_transformers, playwright, requests, psycopg2, torch, pydantic_settings, pypdfium2, docx, pandas, openpyxl" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [*] Installing python dependencies [this may take a few minutes]...
-    pip install -r backend\requirements.txt
+    python -m pip install -r backend\requirements.txt
     if !errorlevel! neq 0 (
         echo [ERROR] Failed to install Python dependencies.
         pause

@@ -175,7 +175,7 @@ class SLMEngine:
                         img_bytes = f.read()
                     img_b64 = base64.b64encode(img_bytes).decode("utf-8")
                     
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={gemini_key}"
                     payload = {
                         "contents": [{
                             "parts": [
@@ -219,14 +219,6 @@ class SLMEngine:
                         result_text = res_json["candidates"][0]["content"]["parts"][0]["text"]
                         data = self._clean_and_load_json(result_text)
                         result_data = self._post_process_data(data, ocr_text)
-                    # If target fields were requested, verify if local SLM actually extracted them.
-                    # If the local LLM failed and returned invalid/unrelated keys (like :r15:), overlay regex fallback.
-                    if target_fields and isinstance(result_data, dict):
-                        matched_keys = [tf for tf in target_fields if (tf.get("id") in result_data or tf.get("name") in result_data)]
-                        if len(matched_keys) == 0:
-                            print("Ollama returned invalid keys. Overlaying rule-based regex fallback.")
-                            fallback_data = self._regex_fallback_extract(ocr_text, target_fields=target_fields)
-                            result_data = {**result_data, **fallback_data}
                     else:
                         status_code = response.status_code if response else "No Response"
                         print(f"Gemini multimodal API returned status code {status_code}. Falling back to standard Gemini.")
@@ -237,7 +229,7 @@ class SLMEngine:
             if not result_data:
                 print("Initiating Gemini AI standard text-only cloud extraction...")
                 try:
-                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key}"
+                    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={gemini_key}"
                     payload = {
                         "contents": [{
                             "parts": [{"text": prompt}]

@@ -215,9 +215,10 @@ class PlaywrightAutomationEngine:
             
             if tag_name == "select":
                 elem.select_option(value=str(value))
-            elif elem_type == "checkbox":
-                if str(value).lower() in ("true", "yes", "checked", "1"):
-                    elem.check()
+            elif elem_type in ("checkbox", "radio"):
+                val_str = str(value).lower()
+                if val_str not in ("false", "no", "unchecked", "0", ""):
+                    elem.check(force=True)
             elif role_attr == "combobox" or "MuiAutocomplete-input" in class_attr:
                 print(f"Handling MUI Autocomplete with value '{value}'")
                 elem.click()
@@ -335,9 +336,10 @@ class PlaywrightAutomationEngine:
                     print("Waiting for dynamic sub-options to load...")
                     page.wait_for_timeout(1000)
             else:
-                elem.click()
+                elem.click(force=True)
                 elem.fill("")
                 page.keyboard.type(str(value), delay=50)
+                page.keyboard.press("Escape") # Close any datepicker or dropdown popups
             return True
         except Exception as e:
             print(f"Error filling element: {e}")
@@ -353,8 +355,8 @@ class PlaywrightAutomationEngine:
         with sync_playwright() as p:
             has_auth = os.path.exists(auth_path)
             
-            # Start headless (can relaunch headed if needed)
-            run_headless = self.headless if has_auth else False
+            # Always run headed so the user can see it
+            run_headless = False
             browser = p.chromium.launch(headless=run_headless)
             
             if has_auth:
@@ -392,7 +394,7 @@ class PlaywrightAutomationEngine:
                     elem_placeholder = elem.get_attribute("placeholder") or ""
                     
                     # Exclude hidden, submit, buttons, password
-                    if elem_type in ("hidden", "submit", "button", "image", "radio", "password"):
+                    if elem_type in ("hidden", "submit", "button", "image", "password"):
                         continue
                         
                     # Skip disabled elements
@@ -638,8 +640,8 @@ class PlaywrightAutomationEngine:
             # Check if we have a saved session state
             has_auth = os.path.exists(auth_path)
             
-            # Start by launching browser (try headless if we have auth, else headed)
-            run_headless = self.headless if has_auth else False
+            # Always run in headed mode so the user can see the automation filling process
+            run_headless = False
             browser = p.chromium.launch(headless=run_headless)
             
             if has_auth:
@@ -963,7 +965,6 @@ class PlaywrightAutomationEngine:
                             self._fill_interactive_element(page, elem, val_to_fill)
                             result["filled"].append(f"row_{r_idx}_col_{header_label}")
             
-            # --- Auto-click Submit Button ---
             submit_selectors = [
                 "button[type='submit']",
                 "input[type='submit']",
@@ -971,9 +972,13 @@ class PlaywrightAutomationEngine:
                 "#submit",
                 ".btn-submit",
                 "button:has-text('Submit')",
+                "a:has-text('Submit')",
+                "[role='button']:has-text('Submit')",
+                ".btn:has-text('Submit')",
+                "text='Submit'",
                 "button:has-text('Confirm')",
                 "button:has-text('Save')",
-                "button:has-text('Create')" # Added 'Create' for ERP form
+                "button:has-text('Create')"
             ]
             
             submit_clicked = False
@@ -981,7 +986,7 @@ class PlaywrightAutomationEngine:
                 try:
                     elem = page.locator(sub_sel).first
                     if elem and elem.is_visible():
-                        elem.click()
+                        elem.click(force=True)
                         submit_clicked = True
                         print(f"Auto-clicked submit button using selector: {sub_sel}")
                         break

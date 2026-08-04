@@ -24,7 +24,8 @@ class Settings(BaseSettings):
     
     # Playwright Settings
     PLAYWRIGHT_HEADLESS: bool = os.getenv("PLAYWRIGHT_HEADLESS", "False").lower() in ("true", "1", "yes")
-    
+
+
     class Config:
         case_sensitive = True
         env_file = ".env"

@@ -112,10 +112,17 @@ class FieldMappingEngine:
         cache_service.set(cache_key, emb.tolist(), expire_seconds=30 * 24 * 3600)
         return emb
 
-    def _get_string_match_score(self, source_key: str, target_field_info: str) -> float:
+    def _get_string_match_score(self, source_key: str, target_field_info: str, source_val: str = "") -> float:
         """Fallback lexical overlap scorer if SentenceTransformers is offline."""
         source_clean = source_key.lower().replace('_', ' ')
         target_clean = target_field_info.lower()
+        val_clean = str(source_val).lower().strip()
+        
+        # 0. Check if the value exactly matches the target field label (perfect for radio/checkboxes)
+        import re
+        if val_clean and len(val_clean) > 2:
+            if val_clean == target_clean or re.search(r'\b' + re.escape(val_clean) + r'\b', target_clean):
+                return 0.95
         
         # Guard: prevent "address" from matching "email address"
         if source_clean == "address" and ("email" in target_clean or "mail" in target_clean):
@@ -262,7 +269,7 @@ class FieldMappingEngine:
                     key_idx = list(valid_extracted.keys()).index(source_key)
                     semantic_score = self.cosine_similarity(key_embeddings[key_idx], desc_embeddings[idx])
                 
-                lexical_score = self._get_string_match_score(source_key, desc)
+                lexical_score = self._get_string_match_score(source_key, desc, value)
                 
                 # Use the highest matching score
                 score = max(semantic_score, lexical_score)

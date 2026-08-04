@@ -33,6 +33,13 @@ class OCREngine:
         except Exception:
             admin_settings = {}
             
+        gemini_api_key = admin_settings.get("gemini_api_key") or settings.GEMINI_API_KEY
+        
+        # FAST TRACK: If Gemini is available, skip EasyOCR entirely to boost speed
+        if gemini_api_key:
+            append_admin_log("ocr", "INFO", "Fast-track mode: Gemini Vision API enabled. Skipping slow offline EasyOCR.")
+            return {"raw_text": "", "words": [], "image_path": image_path}
+            
         gcp_project_id = admin_settings.get("gcp_project_id") or settings.GCP_PROJECT_ID
         gcp_location = admin_settings.get("gcp_location") or settings.GCP_LOCATION
         docai_processor_id = admin_settings.get("docai_processor_id") or settings.DOCAI_PROCESSOR_ID

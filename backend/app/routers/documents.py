@@ -477,7 +477,7 @@ def upload_document(
             append_admin_log("deduplication", "INFO", f"Duplicate SHA-256 match for '{filename}'. Returning cached document ID: {cached_doc_id[:8]}...")
             return cached_doc
 
-    # Save file
+    # Save file locally
     file_path = os.path.join(settings.UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer:
         buffer.write(file_bytes)
@@ -506,15 +506,16 @@ def upload_document(
     # Trigger background pipeline
     import json
     parsed_target_fields = None
-    if target_fields:
+    if target_fields and target_fields != "[]":
         try:
             parsed_target_fields = json.loads(target_fields)
+            if not parsed_target_fields:
+                parsed_target_fields = None
         except Exception as e:
             print(f"Failed to parse target_fields JSON: {e}")
-            
     from ..database import SessionLocal
     background_tasks.add_task(process_document_task, db_doc.id, SessionLocal, target_url, parsed_target_fields)
-    
+            
     return db_doc
 
 
@@ -582,10 +583,16 @@ def get_job_result(job_id: str, db: Session = Depends(get_db)):
     }
 
 
+def sign_document_url(doc: Any) -> Any:
+    # Deprecated: S3 support removed
+    return doc
+
+
 @router.get("", response_model=List[DocumentResponse])
 def get_all_documents(db: Session = Depends(get_db)):
     """Returns a list of all documents, ordered by creation date descending."""
-    return db.query(DBModelDocument).order_by(DBModelDocument.created_at.desc()).all()
+    docs = db.query(DBModelDocument).order_by(DBModelDocument.created_at.desc()).all()
+    return docs
 
 
 @router.get("/{doc_id}", response_model=DocumentResponse)
@@ -615,12 +622,13 @@ def get_document(doc_id: str, db: Session = Depends(get_db)):
     
     if doc.status in ["completed", "failed"]:
         cache_service.set(doc_cache_key, doc_data, expire_seconds=600)
+        
     return doc
 
 
 @router.delete("/{doc_id}")
 def delete_document(doc_id: str, db: Session = Depends(get_db)):
-    """Deletes a document record and clean up associated files on disk."""
+    """Deletes a document record and clean up associated files on disk or S3."""
     doc = db.query(DBModelDocument).filter(DBModelDocument.id == doc_id).first()
     if not doc:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -631,7 +639,7 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
     # Calculate hash to delete from duplicate cache
     try:
         import hashlib
-        if doc.storage_path and os.path.exists(doc.storage_path):
+        if doc.storage_path and not doc.storage_path.startswith("http") and os.path.exists(doc.storage_path):
             with open(doc.storage_path, "rb") as f:
                 f_bytes = f.read()
             f_hash = hashlib.sha256(f_bytes).hexdigest()
@@ -640,28 +648,28 @@ def delete_document(doc_id: str, db: Session = Depends(get_db)):
     except Exception as e:
         print(f"Failed to clear duplicate hash cache: {e}")
     
-    # Try deleting physical files
+    # Try deleting files
     try:
         if doc.storage_path and os.path.exists(doc.storage_path):
             os.remove(doc.storage_path)
             
         # Try deleting preprocessed path
-        preprocessed_filename = f"processed_{os.path.basename(doc.storage_path)}"
-        preprocessed_path = os.path.join(settings.UPLOAD_DIR, preprocessed_filename)
-        if os.path.exists(preprocessed_path):
-            os.remove(preprocessed_path)
-            
-        # Try deleting pdf rendered page image
-        pdf_image_filename = f"pdf_page_{doc.id}.png"
-        pdf_image_path = os.path.join(settings.UPLOAD_DIR, pdf_image_filename)
-        if os.path.exists(pdf_image_path):
-            os.remove(pdf_image_path)
-            
-        # Try deleting screenshots
-        screenshot_filename = f"screenshot_{doc.id}.png"
-        screenshot_path = os.path.join(settings.UPLOAD_DIR, "screenshots", screenshot_filename)
-        if os.path.exists(screenshot_path):
-            os.remove(screenshot_path)
+            preprocessed_filename = f"processed_{os.path.basename(doc.storage_path)}"
+            preprocessed_path = os.path.join(settings.UPLOAD_DIR, preprocessed_filename)
+            if os.path.exists(preprocessed_path):
+                os.remove(preprocessed_path)
+                
+            # Try deleting pdf rendered page image
+            pdf_image_filename = f"pdf_page_{doc.id}.png"
+            pdf_image_path = os.path.join(settings.UPLOAD_DIR, pdf_image_filename)
+            if os.path.exists(pdf_image_path):
+                os.remove(pdf_image_path)
+                
+            # Try deleting screenshots
+            screenshot_filename = f"screenshot_{doc.id}.png"
+            screenshot_path = os.path.join(settings.UPLOAD_DIR, "screenshots", screenshot_filename)
+            if os.path.exists(screenshot_path):
+                os.remove(screenshot_path)
     except Exception as e:
         print(f"Warning: Failed to delete physical files for document {doc_id}: {e}")
         

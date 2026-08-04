@@ -3899,7 +3899,9 @@ export default function App() {
                   <img 
                     src={fillResult.screenshot_url} 
                     alt="Automation Frame"
-                    className="max-h-[50vh] object-contain rounded"
+                    className="w-full h-auto max-h-[75vh] object-contain rounded cursor-pointer hover:opacity-90 transition-opacity"
+                    title="Click to view full size image"
+                    onClick={() => window.open(fillResult.screenshot_url, '_blank')}
                     onError={(e) => {
                       e.target.src = 'https://raw.githubusercontent.com/microsoft/playwright/main/packages/playwright-core/src/server/chromium/video.png';
                     }}
