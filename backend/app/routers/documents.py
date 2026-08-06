@@ -206,12 +206,55 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
             df = df.where(pd.notnull(df), None)
             
             records = []
-            for _, row in df.iterrows():
-                rec = {}
-                for col, val in row.items():
-                    key = clean_excel_key(col)
-                    rec[key] = str(val) if val is not None else ""
-                records.append(post_process_record(rec))
+            parsed_targets = None
+            if target_fields:
+                try:
+                    parsed_targets = json.loads(target_fields)
+                except:
+                    pass
+                    
+            if parsed_targets:
+                from ..services.mapping_engine import FieldMappingEngine
+                mapping_engine = FieldMappingEngine()
+                col_map = {}
+                for col in df.columns:
+                    col_clean = re.sub(r'[^a-zA-Z0-9\s_]', '', str(col)).strip().lower().replace(' ', '_')
+                    matched_fid = None
+                    for tf in parsed_targets:
+                        fid = tf.get("id") or tf.get("name")
+                        flabel = tf.get("label") or ""
+                        if fid.lower() == col_clean or flabel.lower() == str(col).lower():
+                            matched_fid = fid
+                            break
+                    if not matched_fid:
+                        best_fid = None
+                        best_score = 0.0
+                        for tf in parsed_targets:
+                            fid = tf.get("id") or tf.get("name")
+                            flabel = tf.get("label") or ""
+                            score = mapping_engine._get_string_match_score(col_clean, flabel)
+                            if score > best_score:
+                                best_score = score
+                                best_fid = fid
+                        if best_score >= 0.5:
+                            matched_fid = best_fid
+                    if matched_fid:
+                        col_map[col] = matched_fid
+
+                for _, row in df.iterrows():
+                    rec = {}
+                    for col, val in row.items():
+                        if col in col_map:
+                            key = col_map[col]
+                            rec[key] = str(val) if val is not None else ""
+                    records.append(rec)
+            else:
+                for _, row in df.iterrows():
+                    rec = {}
+                    for col, val in row.items():
+                        key = clean_excel_key(col)
+                        rec[key] = str(val) if val is not None else ""
+                    records.append(post_process_record(rec))
                 
             finalize_document_processing(doc_id, "completed", {"records": records}, 1.0, db)
             return
