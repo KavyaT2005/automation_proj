@@ -19,7 +19,7 @@ DATA_FILE = os.path.join(settings.UPLOAD_DIR, "admin_data.json")
 DEFAULT_SETTINGS = {
   "rate_limit_api_key": 100,      # req/min
   "rate_limit_ip": 150,          # req/min
-  "allowed_extensions": ["pdf", "png", "jpeg", "jpg", "tiff"],
+  "allowed_extensions": ["pdf", "png", "jpeg", "jpg", "tiff", "csv", "xlsx", "xls", "ods"],
   "max_file_size_mb": 20,
   "virus_scanning_enabled": True,
   "concurrency_limit_user": 5,
