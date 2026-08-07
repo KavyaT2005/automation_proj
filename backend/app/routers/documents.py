@@ -215,6 +215,8 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                     
             if parsed_targets:
                 from ..services.mapping_engine import FieldMappingEngine
+                import re
+                import json
                 mapping_engine = FieldMappingEngine()
                 col_map = {}
                 for col in df.columns:
