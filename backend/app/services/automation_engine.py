@@ -418,9 +418,7 @@ class PlaywrightAutomationEngine:
                         )
                         label_text = label_text.replace('\u200b', '').replace('\u200c', '').strip().rstrip(":")
                     
-                    # Skip Customer Code completely
-                    if label_text.lower() in ("customer code", "customercode"):
-                        continue
+                    # Customer Code is now allowed to be extracted
                         
                     # Skip Rate selector
                     if label_text.lower() in ("gold & silver rate", "rate"):

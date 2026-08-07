@@ -602,9 +602,9 @@ export default function App() {
       formData.append('file', file);
       if (crawledFields && crawledFields.length > 0) {
         formData.append('target_fields', JSON.stringify(crawledFields));
-        if (targetUrl) {
-          formData.append('target_url', targetUrl);
-        }
+      }
+      if (targetUrl) {
+        formData.append('target_url', targetUrl);
       }
       addLog(`Uploading file buffer: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'db');
 
