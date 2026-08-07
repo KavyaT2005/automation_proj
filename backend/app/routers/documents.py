@@ -221,9 +221,49 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                 import re
                 import json
                 mapping_engine = FieldMappingEngine()
+                
+                def clean_excel_key(raw_key: str) -> str:
+                    clean = re.sub(r'[^a-zA-Z0-9\s_]', '', str(raw_key)).strip().lower()
+                    if any(kw in clean for kw in ["code", "id", "identifier", "no", "num", "number"]):
+                        if "customer" in clean or "client" in clean or "patient" in clean:
+                            return "customer_code"
+                        if "pin" in clean or "zip" in clean or "postal" in clean:
+                            return "pin_code"
+                        if "pan" in clean:
+                            return "pan_no"
+                        if "gst" in clean or "gstin" in clean:
+                            return "gstin_no"
+                        if "phone" in clean or "mobile" in clean or "contact" in clean or "tel" in clean:
+                            return "mobile_number"
+                    if "gst" in clean or "gstin" in clean:
+                        return "gstin_no"
+                    if "pan" in clean:
+                        return "pan_no"
+                    if "pin" in clean or "pincode" in clean or "zip" in clean or "postal" in clean:
+                        return "pin_code"
+                    if "state" in clean or "province" in clean or "region" in clean:
+                        return "state"
+                    if "district" in clean or "city" in clean or "town" in clean or "locality" in clean:
+                        return "district"
+                    if "country" in clean or "nation" in clean:
+                        return "country"
+                    if "address" in clean or "addr" in clean or "location" in clean or "residence" in clean or "street" in clean:
+                        return "address"
+                    if "phone" in clean or "mobile" in clean or "contact" in clean or "tel" in clean or "cell" in clean:
+                        return "mobile_number"
+                    if "email" in clean or "mail" in clean:
+                        return "email"
+                    if "dob" in clean or "birth" in clean:
+                        return "dob"
+                    if "name" in clean or "client" in clean or "patient" in clean or "customer" in clean or "employee" in clean or "owner" in clean:
+                        return "full_name"
+                    return re.sub(r'\s+', '_', clean)
+                
                 col_map = {}
                 for col in df.columns:
                     col_clean = re.sub(r'[^a-zA-Z0-9\s_]', '', str(col)).strip().lower().replace(' ', '_')
+                    normalized_key = clean_excel_key(col)
+                    
                     matched_fid = None
                     for tf in parsed_targets:
                         if not isinstance(tf, dict): continue
@@ -232,6 +272,7 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                         if (fid and fid.lower() == col_clean) or (flabel and flabel.lower() == str(col).lower()):
                             matched_fid = fid
                             break
+                            
                     if not matched_fid:
                         best_fid = None
                         best_score = 0.0
@@ -240,7 +281,11 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                             fid = tf.get("id") or tf.get("name") or ""
                             flabel = tf.get("label") or ""
                             if not fid and not flabel: continue
-                            score = mapping_engine._get_string_match_score(col_clean, flabel or fid)
+                            
+                            score_raw = mapping_engine._get_string_match_score(col_clean, flabel or fid)
+                            score_norm = mapping_engine._get_string_match_score(normalized_key, flabel or fid)
+                            score = max(score_raw, score_norm)
+                            
                             if score > best_score:
                                 best_score = score
                                 best_fid = fid
