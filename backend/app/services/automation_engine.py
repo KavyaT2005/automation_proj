@@ -375,18 +375,26 @@ class PlaywrightAutomationEngine:
             browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
                 
             # Wait for inputs to render
-            # Wait for inputs to render
             try:
                 page.wait_for_selector("input, textarea, select", timeout=15000)
             except Exception:
                 pass
-                pass
+                
+            # DUMP HTML FOR DEBUGGING
+            try:
+                html_content = page.content()
+                with open("debug_page_dump.html", "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                print(f"Dumped page HTML to debug_page_dump.html (URL: {url})")
+            except Exception as e:
+                print(f"Failed to dump HTML: {e}")
                 
             # Inject resolveInputLabel function
             page.evaluate(JS_RESOLVER_DEFINITION)
             
             # Scan standard text inputs, textareas, checkboxes, selects
             elements = page.query_selector_all("input, textarea, select")
+            print(f"DEBUG: Found {len(elements)} elements on the page.")
             
             for index, elem in enumerate(elements):
                 try:
