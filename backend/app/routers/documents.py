@@ -206,10 +206,10 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
             df = df.where(pd.notnull(df), None)
             
             records = []
-            parsed_targets = None
-            if target_fields:
+            parsed_targets = target_fields if isinstance(target_fields, list) else None
+            if not parsed_targets and target_fields:
                 try:
-                    parsed_targets = json.loads(target_fields)
+                    parsed_targets = json.loads(target_fields) if isinstance(target_fields, str) else target_fields
                 except:
                     pass
                     
@@ -221,18 +221,21 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                     col_clean = re.sub(r'[^a-zA-Z0-9\s_]', '', str(col)).strip().lower().replace(' ', '_')
                     matched_fid = None
                     for tf in parsed_targets:
-                        fid = tf.get("id") or tf.get("name")
+                        if not isinstance(tf, dict): continue
+                        fid = tf.get("id") or tf.get("name") or ""
                         flabel = tf.get("label") or ""
-                        if fid.lower() == col_clean or flabel.lower() == str(col).lower():
+                        if (fid and fid.lower() == col_clean) or (flabel and flabel.lower() == str(col).lower()):
                             matched_fid = fid
                             break
                     if not matched_fid:
                         best_fid = None
                         best_score = 0.0
                         for tf in parsed_targets:
-                            fid = tf.get("id") or tf.get("name")
+                            if not isinstance(tf, dict): continue
+                            fid = tf.get("id") or tf.get("name") or ""
                             flabel = tf.get("label") or ""
-                            score = mapping_engine._get_string_match_score(col_clean, flabel)
+                            if not fid and not flabel: continue
+                            score = mapping_engine._get_string_match_score(col_clean, flabel or fid)
                             if score > best_score:
                                 best_score = score
                                 best_fid = fid
