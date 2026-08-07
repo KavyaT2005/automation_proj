@@ -1000,6 +1000,10 @@ export default function App() {
   };
 
   const getFieldLabel = (key) => {
+    if (crawledFields && crawledFields.length > 0) {
+      const crawled = crawledFields.find(f => (f.id === key || f.name === key));
+      if (crawled && crawled.label) return crawled.label.replace('*', '').trim();
+    }
     const std = STANDARD_FIELDS.find(f => f.key === key) || customFields.find(f => f.key === key);
     return std ? std.label : key.replace(/_/g, ' ');
   };
