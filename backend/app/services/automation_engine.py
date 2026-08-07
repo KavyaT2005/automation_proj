@@ -28,37 +28,55 @@ window.resolveInputLabel = (elem) => {
     function clean(txt) {
         return txt ? txt.replace(/[\u200b\u200c\n]/g, '').replace(/\*$/, '').trim() : '';
     }
+    
+    let ariaLabel = elem.getAttribute('aria-label');
+    if (ariaLabel && clean(ariaLabel)) return clean(ariaLabel);
+    
+    let placeholder = elem.getAttribute('placeholder');
+    if (placeholder && clean(placeholder)) return clean(placeholder);
+    
     let id = elem.id;
     if (id) {
         let label = document.querySelector(`label[for="${id}"]`);
         if (label && clean(label.innerText)) return clean(label.innerText);
     }
+    
     let current = elem;
     for (let i = 0; i < 5; i++) {
         let parent = current.parentElement;
         if (!parent) break;
         
+        let legend = parent.querySelector('legend');
+        if (legend && clean(legend.innerText)) {
+            let txt = clean(legend.innerText);
+            if (txt.length > 0 && txt.length < 50) return txt;
+        }
+        
         let sibling = current.previousElementSibling;
         while (sibling) {
             let sibText = clean(sibling.innerText);
-            if (sibText && sibText.length < 50 && /[a-zA-Z]/.test(sibText)) {
+            if (sibText && sibText.length > 0 && sibText.length < 50 && /[a-zA-Z]/.test(sibText)) {
                 return sibText;
             }
             sibling = sibling.previousElementSibling;
         }
         
         let parentSib = parent.previousElementSibling;
-        if (parentSib) {
+        while (parentSib) {
             let sibText = clean(parentSib.innerText);
-            if (sibText && sibText.length < 50 && /[a-zA-Z]/.test(sibText)) {
+            if (sibText && sibText.length > 0 && sibText.length < 50 && /[a-zA-Z]/.test(sibText)) {
                 return sibText;
             }
+            parentSib = parentSib.previousElementSibling;
         }
         
-        let pText = clean(parent.innerText);
-        if (pText && pText.length < 50 && /[a-zA-Z]/.test(pText)) {
-            return pText;
+        if (parent.tagName.toLowerCase() === 'label') {
+             let pText = clean(parent.innerText);
+             if (pText && pText.length > 0 && pText.length < 50 && /[a-zA-Z]/.test(pText)) {
+                 return pText;
+             }
         }
+        
         current = parent;
     }
     return '';
@@ -454,7 +472,8 @@ class PlaywrightAutomationEngine:
                         "label": label_text or elem_name or elem_id,
                         "selector": selector
                     })
-                except Exception:
+                except Exception as e:
+                    print(f"DEBUG: Exception extracting element {index}: {e}")
                     pass
                 
             browser.close()
