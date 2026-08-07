@@ -375,9 +375,11 @@ class PlaywrightAutomationEngine:
             browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
                 
             # Wait for inputs to render
+            # Wait for inputs to render
             try:
-                page.wait_for_selector("input", timeout=5000)
+                page.wait_for_selector("input, textarea, select", timeout=15000)
             except Exception:
+                pass
                 pass
                 
             # Inject resolveInputLabel function
