@@ -213,6 +213,9 @@ def process_document_task(doc_id: str, db_session_maker, target_url: Optional[st
                 except:
                     pass
                     
+            if not parsed_targets and target_url:
+                raise ValueError(f"Could not extract any form fields from the target URL ({target_url}). Ensure the URL is correct, accessible, and has visible input fields.")
+                
             if parsed_targets:
                 from ..services.mapping_engine import FieldMappingEngine
                 import re
