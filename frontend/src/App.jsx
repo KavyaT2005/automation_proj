@@ -596,6 +596,9 @@ export default function App() {
     setUploadProgress('uploading');
     addLog(`Initiating packet upload of ${selectedFiles.length} file(s)...`, 'sys');
 
+    let allRecords = [];
+    let baseData = null;
+
     // Concurrently upload all selected files
     await Promise.all(selectedFiles.map(async (file, index) => {
       const formData = new FormData();
@@ -606,30 +609,57 @@ export default function App() {
       if (targetUrl) {
         formData.append('target_url', targetUrl);
       }
-      addLog(`Uploading file buffer: ${file.name} (${Math.round(file.size / 1024)} KB)`, 'db');
-
+      
       try {
-        const res = await secureFetch('/api/v1/documents/upload', {
+        const response = await secureFetch('/api/v1/documents/upload', {
           method: 'POST',
           body: formData
         });
-        if (res.ok) {
-          const data = await res.json();
-          addLog(`Server successfully locked file ID: ${data.id.substring(0, 8)}...`, 'sys');
-          // Auto-select the first uploaded file in this batch
-          if (index === 0) {
-            setSelectedDocId(data.id);
-            setDocumentId(data.id);
-            setDocumentData(data);
-            setUploadProgress('preprocessing');
+        
+        if (response.ok) {
+          const data = await response.json();
+          addLog(`Document processed successfully: ${file.name}`, 'sys');
+          
+          const extracted = data.extracted_json || {};
+          
+          if (extracted.records && Array.isArray(extracted.records) && extracted.records.length > 0) {
+             allRecords = allRecords.concat(extracted.records);
+          } else if (Object.keys(extracted).length > 0) {
+             allRecords.push(extracted);
+          } else {
+             allRecords.push({}); // Push empty record for failed Extractions
           }
+
+          if (!baseData) {
+            baseData = data;
+          }
+        } else {
+          addLog(`Document processing failed for: ${file.name}`, 'err');
         }
       } catch (err) {
-        addLog(`Error uploading packet: ${file.name}`, 'sys');
-        console.error("Upload error for file:", file.name, err);
+        addLog(`Network error during upload of: ${file.name}`, 'err');
       }
     }));
+    
+    if (baseData) {
+      if (!baseData.extracted_json) {
+        baseData.extracted_json = {};
+      }
+      baseData.extracted_json.records = allRecords;
+      setSelectedDocId(baseData.id);
+      setDocumentId(baseData.id);
+      setDocumentData(baseData);
+      setActiveRecordIdx(0);
+      setUploadProgress('complete');
+    } else {
+      setUploadProgress('error');
+    }
 
+    setTimeout(() => {
+      if (document.querySelector('.upload-dropzone input')) {
+        document.querySelector('.upload-dropzone input').value = '';
+      }
+    }, 100);
     fetchDocuments();
   };
 
@@ -1342,11 +1372,11 @@ export default function App() {
               {(() => {
                 const activeFields = getActiveFields();
                 const keysToExclude = ['id', 'created_at', 'updated_at', 'status', 'filename', 'storage_path', 'mime_type', 'confidence_score', 'ocr_raw_text', 'records', '_pipeline_metadata'];
-                const editableFields = Object.entries(activeFields).filter(([key]) => !keysToExclude.includes(key));
                 
-                if (editableFields.length === 0) {
-                  return <p className="text-xs text-slate-400 italic p-4 text-center">No fields resolved. Choose or create fields below.</p>;
-                }
+                // Get fields that were extracted
+                let editableFieldsMap = new Map(
+                  Object.entries(activeFields).filter(([key]) => !keysToExclude.includes(key))
+                );
                 
                 // Required fields check
                 const defaultRequiredFields = [
@@ -1372,15 +1402,26 @@ export default function App() {
                     }));
                 }
                 
+                // Inject required fields into the map if they are completely missing from the extracted data
+                requiredFields.forEach(rf => {
+                  if (!editableFieldsMap.has(rf.key)) {
+                    editableFieldsMap.set(rf.key, '');
+                  }
+                });
+                
+                const editableFields = Array.from(editableFieldsMap.entries());
+
+                if (editableFields.length === 0) {
+                  return <p className="text-xs text-slate-400 italic p-4 text-center">No fields resolved. Choose or create fields below.</p>;
+                }
+                
                 const missingRequired = requiredFields.filter(f => {
-                  const val = (activeFields && f.key && activeFields[f.key] !== undefined) ? activeFields[f.key] : '';
+                  const val = editableFieldsMap.get(f.key);
                   return !val || !val.toString().trim();
                 });
 
                 return (
                   <>
-                    
-                    
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                       {editableFields.map(([key, val]) => {
                         const std = STANDARD_FIELDS.find(f => f.key === key);
