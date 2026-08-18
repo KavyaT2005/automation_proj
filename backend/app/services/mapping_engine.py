@@ -114,7 +114,7 @@ class FieldMappingEngine:
 
     def _get_string_match_score(self, source_key: str, target_field_info: str, source_val: str = "") -> float:
         """Fallback lexical overlap scorer if SentenceTransformers is offline."""
-        source_clean = source_key.lower().replace('_', ' ')
+        source_clean = source_key.lower().replace('_', ' ').strip()
         target_clean = target_field_info.lower()
         val_clean = str(source_val).lower().strip()
         
@@ -131,14 +131,27 @@ class FieldMappingEngine:
                 return 0.0
         
         # 1. Check exact or substring containment of primary key
-        if source_clean in target_clean or source_key in target_clean:
+        if source_clean in target_clean or source_key.lower().strip() in target_clean or target_clean in source_clean:
             return 0.8
             
         # 2. Check synonyms
-        for syn in self.synonyms.get(source_key, []):
-            if syn in target_clean:
-                return 0.7
+        normalized_src = source_clean.replace(' ', '_')
+        matching_synonym_lists = []
+        
+        if normalized_src in self.synonyms:
+            matching_synonym_lists.append(self.synonyms[normalized_src])
+            
+        for canon, syn_list in self.synonyms.items():
+            canon_clean = canon.replace('_', ' ')
+            if source_clean == canon_clean or source_clean in syn_list or normalized_src in syn_list:
+                matching_synonym_lists.append(syn_list)
                 
+        for syn_list in matching_synonym_lists:
+            for syn in syn_list:
+                syn_clean = syn.replace('_', ' ')
+                if syn_clean in target_clean or syn in target_clean:
+                    return 0.7
+                    
         return 0.0
 
     def map_fields(

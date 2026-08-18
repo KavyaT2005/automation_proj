@@ -6,6 +6,7 @@ import {
   ShieldAlert, Monitor, ChevronRight, Sliders, Settings, Shield,
   Key, Lock, Zap
 } from 'lucide-react';
+import OrchestratorDashboard from './OrchestratorDashboard';
 
 const STANDARD_FIELDS = [
   { key: 'full_name', label: 'Customer Name', placeholder: 'e.g. G 5 TRADERS' },
@@ -2796,6 +2797,14 @@ export default function App() {
               {!sidebarCollapsed && <span className="nav-label">Automation</span>}
             </button>
 
+            <button 
+              onClick={() => setActivePage('orchestrator')}
+              className={`erp-sidebar-item ${activePage === 'orchestrator' ? 'active' : ''}`}
+            >
+              <Layers className="nav-icon text-emerald-400" />
+              {!sidebarCollapsed && <span className="nav-label text-emerald-400 font-bold">Master Orchestrator</span>}
+            </button>
+
             <div className="erp-sidebar-divider" />
 
             {/* Group: Administration */}
@@ -2879,6 +2888,7 @@ export default function App() {
                 {activePage === 'admin-keys' && 'Workspace Key Registry'}
                 {activePage === 'admin-logs' && 'Security Audit Terminal'}
                 {activePage === 'console' && 'System Engine Live Feed'}
+                {activePage === 'orchestrator' && 'Master Orchestrator (Multi-Sheet)'}
               </span>
             </div>
 
@@ -3251,6 +3261,13 @@ export default function App() {
                     {renderEvidencePlugin()}
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* ORCHESTRATOR PAGE */}
+            {activePage === 'orchestrator' && (
+              <div className="page-content p-6 fade-in">
+                <OrchestratorDashboard secureFetch={secureFetch} addLog={addLog} />
               </div>
             )}
 

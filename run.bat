@@ -97,9 +97,9 @@ echo   Starting Services...
 echo ===================================================
 echo [*] Launching Backend Server (Uvicorn on Port 8000)...
 if exist ".venv" (
-    start "Unitive Backend" cmd /k "call .venv\Scripts\activate && cd backend && uvicorn app.main:app --port 8000 --reload"
+    start "Unitive Backend" cmd /k "call .venv\Scripts\activate && cd backend && python -m uvicorn app.main:app --port 8000 --reload"
 ) else (
-    start "Unitive Backend" cmd /k "call venv\Scripts\activate && cd backend && uvicorn app.main:app --port 8000 --reload"
+    start "Unitive Backend" cmd /k "call venv\Scripts\activate && cd backend && python -m uvicorn app.main:app --port 8000 --reload"
 )
 
 echo [*] Launching Frontend Server (Vite on Port 5173)...

@@ -202,11 +202,14 @@ async def rate_limiting_middleware(request: Request, call_next):
     response.headers["X-Correlation-ID"] = correlation_id
     return response
 
+from .routers import documents, mappings, automation, admin, orchestrator
+
 # Route registrations
 app.include_router(documents.router, prefix=settings.API_V1_STR)
 app.include_router(mappings.router, prefix=settings.API_V1_STR)
 app.include_router(automation.router, prefix=settings.API_V1_STR)
 app.include_router(admin.router, prefix=settings.API_V1_STR)
+app.include_router(orchestrator.router, prefix=settings.API_V1_STR)
 
 # Serve uploaded documents & Playwright screenshots
 # Create sub-folders if missing

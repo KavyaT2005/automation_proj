@@ -1381,3 +1381,115 @@ class PlaywrightAutomationEngine:
             browser.close()
             
         return result
+
+    def run_orchestrator_job(self, workbook_id: str, mapping_engine: Any, db: Any) -> Dict[str, Any]:
+        """
+        Executes automation for an entire multi-sheet workbook sequentially.
+        Maintains a global memory to auto-fill dependent sheets (e.g., fetching 
+        customer name based on phone number provided in the Saving Scheme sheet).
+        """
+        from ..models.orchestrator import WorkbookSheet, AutomationJob, AutomationRecord, ExecutionLog
+        import os
+        from ..config import settings
+        
+        # 1. Fetch all sheets in the workbook
+        sheets = db.query(WorkbookSheet).filter(WorkbookSheet.workbook_id == workbook_id).all()
+        if not sheets:
+            return {"success": False, "message": "No sheets found in workbook"}
+            
+        results = {"success": True, "sheets_processed": 0, "logs": []}
+        
+        # Global memory to share data between sheets (Mentor's Cross-Sheet Auto-fill Idea)
+        global_customer_cache = {}
+        
+        for sheet in sheets:
+            # 2. Fetch the corresponding job/target URL
+            job = db.query(AutomationJob).filter(AutomationJob.sheet_id == sheet.id).first()
+            if not job or not job.target_url:
+                msg = f"Skipping sheet '{sheet.sheet_name}' (No target URL configured)"
+                print(msg)
+                results["logs"].append(msg)
+                continue
+                
+            job.status = "running"
+            db.commit()
+                
+            # 3. Fetch all records for this job
+            records = db.query(AutomationRecord).filter(AutomationRecord.job_id == job.id).order_by(AutomationRecord.row_index).all()
+            if not records:
+                continue
+                
+            print(f"Starting orchestration for sheet '{sheet.sheet_name}' with {len(records)} records...")
+            
+            # 4. Extract data in the format expected by fill_form_bulk
+            record_dicts = [r.extracted_data for r in records]
+            
+            # 4.5. Cross-sheet Auto-fill (Relational Memory)
+            for rec in record_dicts:
+                unique_ids = []
+                for k, v in rec.items():
+                    clean_k = k.lower().replace(" ", "_").strip()
+                    val_str = str(v).strip()
+                    # Identify primary keys
+                    if clean_k in ["mobile_number", "mobile", "phone", "phone_number", "contact_no", "email", "customer_code", "pan_no", "pan", "gstin", "gstin_no"] and len(val_str) > 3:
+                        unique_ids.append(val_str)
+                
+                # Find if any of these IDs exist in our global memory
+                matched_memory = None
+                for uid in unique_ids:
+                    if uid in global_customer_cache:
+                        matched_memory = global_customer_cache[uid]
+                        break
+                
+                if matched_memory:
+                    # Enrich current record with missing data from memory
+                    for mem_k, mem_v in matched_memory.items():
+                        if (mem_k not in rec or not str(rec.get(mem_k, "")).strip()) and mem_v:
+                            rec[mem_k] = mem_v
+                
+                # Update memory with the enriched record for ALL its unique IDs
+                for uid in unique_ids:
+                    if uid not in global_customer_cache:
+                        global_customer_cache[uid] = {}
+                    global_customer_cache[uid].update(rec)
+            
+            screenshot_dir = os.path.join(settings.UPLOAD_DIR, "screenshots", "orchestrator", workbook_id, sheet.sheet_name)
+            os.makedirs(screenshot_dir, exist_ok=True)
+            
+            # Execute bulk fill for this sheet
+            try:
+                sheet_res = self.fill_form_bulk(
+                    url=job.target_url,
+                    records=record_dicts,
+                    mapping_engine=mapping_engine,
+                    db=db,
+                    screenshot_dir=screenshot_dir
+                )
+                
+                # Update record statuses based on results
+                fill_results = sheet_res.get("results", [])
+                for idx, r in enumerate(records):
+                    if idx < len(fill_results):
+                        if fill_results[idx].get("success"):
+                            r.status = "success"
+                        else:
+                            r.status = "failed"
+                            # log the error
+                            err_msgs = fill_results[idx].get("errors", [])
+                            err_log = ExecutionLog(record_id=r.id, log_level="error", message="; ".join(err_msgs))
+                            db.add(err_log)
+                
+                job.status = "completed" if sheet_res["success"] else "completed_with_errors"
+                db.commit()
+                results["sheets_processed"] += 1
+                successes = len([r for r in fill_results if r.get('success')])
+                failures = len(fill_results) - successes
+                results["logs"].append(f"Completed sheet '{sheet.sheet_name}': {successes} successes, {failures} failures")
+                
+            except Exception as e:
+                print(f"Error orchestrating sheet '{sheet.sheet_name}': {e}")
+                job.status = "failed"
+                db.commit()
+                results["logs"].append(f"Failed sheet '{sheet.sheet_name}': {str(e)}")
+                
+        return results
