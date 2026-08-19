@@ -239,9 +239,17 @@ class PlaywrightAutomationEngine:
                     elem.check(force=True)
             elif role_attr == "combobox" or "MuiAutocomplete-input" in class_attr:
                 print(f"Handling MUI Autocomplete with value '{value}'")
-                elem.click()
-                page.wait_for_timeout(300)
+                elem.click(force=True)
+                page.wait_for_timeout(500)
                 
+                # Try to force open by typing the first few chars if options don't appear
+                try:
+                    page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=1000)
+                except Exception:
+                    elem.fill("")
+                    page.keyboard.type(str(value)[:4], delay=100)
+                    page.wait_for_timeout(1000)
+
                 # Case-insensitive, space-insensitive, and fuzzy option matching
                 try:
                     page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=2000)
@@ -392,6 +400,22 @@ class PlaywrightAutomationEngine:
             # Perform login handling (includes headed relaunch and wait loops)
             browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
                 
+            # If a module name is provided (from Master Orchestrator), try to navigate to it via sidebar click
+            if module_name:
+                try:
+                    print(f"Attempting to navigate to module '{module_name}' via UI click...")
+                    # Let UI settle first
+                    page.wait_for_timeout(2000)
+                    
+                    # Look for a link or button that matches the sheet name (case-insensitive loosely)
+                    # Use get_by_role('link', name=...) or get_by_text
+                    target_locator = page.get_by_text(module_name, exact=False).first
+                    target_locator.click(timeout=5000)
+                    print(f"Clicked on module '{module_name}'. Waiting for network idle...")
+                    page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception as e:
+                    print(f"Warning: Could not automatically navigate to module '{module_name}' via click: {e}")
+
             # Wait for inputs to render
             try:
                 page.wait_for_selector("input, textarea, select", timeout=15000)
@@ -585,8 +609,8 @@ class PlaywrightAutomationEngine:
         inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
         has_password = page.query_selector("input[type='password']") is not None
         
-        # If there is a password field and inputs are few, we are on a login page
-        is_login_page = has_password or inputs_count <= 2
+        # If there is a password field or the URL implies login, we are on a login page
+        is_login_page = has_password or "login" in page.url.lower()
         
         if is_login_page:
             print("Login page detected. Initiating authentication flow...")
@@ -597,7 +621,7 @@ class PlaywrightAutomationEngine:
             # Recheck if still on login page
             inputs_count = len(page.query_selector_all("input:not([type='hidden']), textarea, select"))
             has_password = page.query_selector("input[type='password']") is not None
-            still_on_login = has_password or inputs_count <= 2
+            still_on_login = has_password or "login" in page.url.lower()
             
             if still_on_login:
                 if run_headless:
@@ -629,10 +653,11 @@ class PlaywrightAutomationEngine:
                 for sec in range(180):
                     page.wait_for_timeout(1000)
                     has_password = page.query_selector("input[type='password']") is not None
-                    inputs = page.query_selector_all("input:not([type='hidden']), textarea, select")
-                    if not has_password and len(inputs) > 2:
+                    is_login_url = "login" in page.url.lower()
+                    
+                    if not has_password and not is_login_url:
                         logged_in = True
-                        print("Authentication successful! Form fields detected.")
+                        print("Authentication successful! Left the login page.")
                         break
                     if (sec + 1) % 10 == 0:
                         print(f"Waiting for manual login... ({sec + 1}/180 seconds elapsed)")
@@ -1057,7 +1082,8 @@ class PlaywrightAutomationEngine:
         mapping_engine: Any, 
         db: Any, 
         screenshot_dir: str,
-        auth_cookies: List[Dict[str, Any]] = None
+        auth_cookies: List[Dict[str, Any]] = None,
+        module_name: str = None
     ) -> Dict[str, Any]:
         """
         Loops through all records, navigating to the form URL for each record,
@@ -1100,6 +1126,46 @@ class PlaywrightAutomationEngine:
                 # Navigate to the form URL for this record
                 try:
                     page.goto(url, wait_until="load", timeout=30000)
+                    
+                    # --- Module UI Navigation ---
+                    if module_name:
+                        try:
+                            print(f"Bulk Autofill: Navigating to module '{module_name}' via sidebar click...")
+                            page.wait_for_timeout(2000)
+                            target_locator = page.get_by_text(module_name, exact=False).first
+                            target_locator.click(timeout=5000)
+                            print(f"Clicked on module '{module_name}'. Waiting for network idle...")
+                            page.wait_for_load_state("networkidle", timeout=5000)
+                            
+                            # Auto-click 'Create' or 'Add' button to open the form using robust JS
+                            try:
+                                print(f"Looking for 'Create' or 'Add' button in {module_name}...")
+                                page.wait_for_timeout(2000)
+                                clicked = page.evaluate('''() => {
+                                    const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
+                                    const target = buttons.find(b => {
+                                        const text = (b.innerText || b.textContent || "").toLowerCase();
+                                        return text.includes("create") || text.includes("add") || text.includes("new");
+                                    });
+                                    if (target) {
+                                        target.click();
+                                        return true;
+                                    }
+                                    return false;
+                                }''')
+                                
+                                if clicked:
+                                    print("Clicked create/add button to open form via JS.")
+                                    page.wait_for_load_state("networkidle", timeout=5000)
+                                    page.wait_for_timeout(1500)
+                                else:
+                                    print("No explicit Create/Add button found via JS.")
+                            except Exception as create_e:
+                                print(f"Create/Add button JS click failed: {create_e}")
+
+                        except Exception as nav_e:
+                            print(f"Warning: Could not automatically navigate to module '{module_name}' via click: {nav_e}")
+
                     # Wait for form inputs to render
                     page.wait_for_selector("input:not([type='hidden']), textarea, select", timeout=10000)
                     
@@ -1382,7 +1448,7 @@ class PlaywrightAutomationEngine:
             
         return result
 
-    def run_orchestrator_job(self, workbook_id: str, mapping_engine: Any, db: Any) -> Dict[str, Any]:
+    def run_orchestrator_job(self, workbook_id: str, mapping_engine: Any, db: Any, base_url: str = None) -> Dict[str, Any]:
         """
         Executes automation for an entire multi-sheet workbook sequentially.
         Maintains a global memory to auto-fill dependent sheets (e.g., fetching 
@@ -1403,9 +1469,10 @@ class PlaywrightAutomationEngine:
         global_customer_cache = {}
         
         for sheet in sheets:
-            # 2. Fetch the corresponding job/target URL
+            # 2. Fetch the corresponding job
             job = db.query(AutomationJob).filter(AutomationJob.sheet_id == sheet.id).first()
-            if not job or not job.target_url:
+            target_url = base_url or (job and job.target_url)
+            if not target_url:
                 msg = f"Skipping sheet '{sheet.sheet_name}' (No target URL configured)"
                 print(msg)
                 results["logs"].append(msg)
@@ -1459,11 +1526,12 @@ class PlaywrightAutomationEngine:
             # Execute bulk fill for this sheet
             try:
                 sheet_res = self.fill_form_bulk(
-                    url=job.target_url,
+                    url=target_url,
                     records=record_dicts,
                     mapping_engine=mapping_engine,
                     db=db,
-                    screenshot_dir=screenshot_dir
+                    screenshot_dir=screenshot_dir,
+                    module_name=sheet.sheet_name
                 )
                 
                 # Update record statuses based on results

@@ -149,8 +149,11 @@ from ..services.mapping_engine import FieldMappingEngine
 automation_engine = PlaywrightAutomationEngine()
 mapping_engine = FieldMappingEngine()
 
+class StartOrchestratorRequest(BaseModel):
+    base_url: str
+
 @router.post("/start/{workbook_id}")
-def start_orchestration(workbook_id: str, db: Session = Depends(get_db)):
+def start_orchestration(workbook_id: str, request: StartOrchestratorRequest, db: Session = Depends(get_db)):
     workbook = db.query(Workbook).filter(Workbook.id == workbook_id).first()
     if not workbook:
         raise HTTPException(status_code=404, detail="Workbook not found")
@@ -158,9 +161,8 @@ def start_orchestration(workbook_id: str, db: Session = Depends(get_db)):
     workbook.status = "running"
     db.commit()
 
-    # In a real app this should be a background task (e.g. Celery / BackgroundTasks)
-    # For now, we will block the request and return results
-    results = automation_engine.run_orchestrator_job(workbook_id, mapping_engine, db)
+    # Pass the base_url to the engine
+    results = automation_engine.run_orchestrator_job(workbook_id, mapping_engine, db, base_url=request.base_url)
 
     workbook.status = "completed" if results["success"] else "completed_with_errors"
     db.commit()

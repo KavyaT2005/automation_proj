@@ -7,6 +7,7 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
   const [workbookDetails, setWorkbookDetails] = useState(null);
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [baseAppUrl, setBaseAppUrl] = useState('');
 
   const fetchWorkbooks = async () => {
     try {
@@ -104,26 +105,14 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
     }
   };
 
-  const handleTargetUrlChange = async (jobId, newUrl) => {
-    // Optimistic UI update
-    setWorkbookDetails(prev => ({
-      ...prev,
-      sheets: prev.sheets.map(s => s.job_id === jobId ? { ...s, target_url: newUrl } : s)
-    }));
-
-    try {
-      await secureFetch(`/api/v1/orchestrator/job/${jobId}/config`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_url: newUrl })
-      });
-    } catch (e) {
-      console.error("Failed to update config");
-    }
-  };
+  // Target config is now set via baseAppUrl globally
 
   const startOrchestration = async () => {
     if (!selectedWorkbookId) return;
+    if (!baseAppUrl) {
+      alert("Please provide the Base Application URL first.");
+      return;
+    }
     addLog(`Initiating master orchestration for workbook ID: ${selectedWorkbookId}`, 'sys');
     
     // Optimistic state
@@ -131,12 +120,16 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
     
     try {
       const res = await secureFetch(`/api/v1/orchestrator/start/${selectedWorkbookId}`, {
-        method: 'POST'
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ base_url: baseAppUrl })
       });
       if (res.ok) {
         const data = await res.json();
         addLog(`Master orchestration completed. Processed ${data.sheets_processed} sheets.`, 'sys');
         fetchWorkbookDetails(selectedWorkbookId);
+      } else {
+        alert("Automation API failed with status " + res.status);
       }
     } catch (e) {
       addLog(`Master orchestration failed.`, 'err');
@@ -234,14 +227,23 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                 ORCHESTRATION IN PROGRESS
               </div>
             ) : (
-              <button 
-                onClick={startOrchestration}
-                disabled={workbookDetails.status === 'running'}
-                className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold flex items-center gap-1.5 transition-colors"
-              >
-                <Play className="w-3 h-3" />
-                START MASTER AUTOMATION
-              </button>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="text" 
+                  value={baseAppUrl}
+                  onChange={(e) => setBaseAppUrl(e.target.value)}
+                  placeholder="Enter Base Application URL..."
+                  className="input-glass text-xs w-[250px]"
+                />
+                <button 
+                  onClick={startOrchestration}
+                  disabled={workbookDetails.status === 'running' || !baseAppUrl}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Play className="w-3 h-3" />
+                  START MASTER AUTOMATION
+                </button>
+              </div>
             )}
           </div>
 
@@ -251,7 +253,6 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                 <tr className="border-b border-slate-800">
                   <th className="py-3 px-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Sheet Name</th>
                   <th className="py-3 px-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Total Rows</th>
-                  <th className="py-3 px-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Target Config</th>
                   <th className="py-3 px-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">Execution Status</th>
                 </tr>
               </thead>
@@ -266,16 +267,6 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                     </td>
                     <td className="py-3 px-4 text-xs text-slate-400 font-mono">
                       {sheet.record_count} Records
-                    </td>
-                    <td className="py-3 px-4">
-                      <input 
-                        type="text" 
-                        value={sheet.target_url || ''}
-                        onChange={(e) => handleTargetUrlChange(sheet.job_id, e.target.value)}
-                        disabled={workbookDetails.status === 'running'}
-                        placeholder="Paste target URL..."
-                        className="input-glass text-xs w-full max-w-[250px]"
-                      />
                     </td>
                     <td className="py-3 px-4">
                       {sheet.status === 'completed' ? (
