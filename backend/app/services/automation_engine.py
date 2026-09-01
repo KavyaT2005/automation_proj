@@ -1119,6 +1119,8 @@ class PlaywrightAutomationEngine:
             # Perform login handling (includes headed relaunch and wait loops)
             browser, context, page = self._handle_login_flow(p, browser, context, page, url, auth_path, run_headless)
 
+            cached_form_fields = None
+
             # --- Now we loop through the records ---
             for record_idx, record in enumerate(records):
                 print(f"Bulk Autofill: Processing record {record_idx + 1}/{len(records)} ({record.get('full_name', 'Unnamed')})")
@@ -1131,16 +1133,19 @@ class PlaywrightAutomationEngine:
                     if module_name:
                         try:
                             print(f"Bulk Autofill: Navigating to module '{module_name}' via sidebar click...")
-                            page.wait_for_timeout(2000)
+                            page.wait_for_timeout(1000)
                             target_locator = page.get_by_text(module_name, exact=False).first
-                            target_locator.click(timeout=5000)
+                            target_locator.click(timeout=3000)
                             print(f"Clicked on module '{module_name}'. Waiting for network idle...")
-                            page.wait_for_load_state("networkidle", timeout=5000)
+                            try:
+                                page.wait_for_load_state("networkidle", timeout=3000)
+                            except Exception:
+                                pass
                             
                             # Auto-click 'Create' or 'Add' button to open the form using robust JS
                             try:
                                 print(f"Looking for 'Create' or 'Add' button in {module_name}...")
-                                page.wait_for_timeout(2000)
+                                page.wait_for_timeout(1000)
                                 clicked = page.evaluate('''() => {
                                     const buttons = Array.from(document.querySelectorAll("button, a, [role='button']"));
                                     const target = buttons.find(b => {
@@ -1156,8 +1161,11 @@ class PlaywrightAutomationEngine:
                                 
                                 if clicked:
                                     print("Clicked create/add button to open form via JS.")
-                                    page.wait_for_load_state("networkidle", timeout=5000)
-                                    page.wait_for_timeout(1500)
+                                    try:
+                                        page.wait_for_load_state("networkidle", timeout=3000)
+                                    except Exception:
+                                        pass
+                                    page.wait_for_timeout(500)
                                 else:
                                     print("No explicit Create/Add button found via JS.")
                             except Exception as create_e:
@@ -1174,65 +1182,73 @@ class PlaywrightAutomationEngine:
                         inputs = page.query_selector_all("input:not([type='hidden']), textarea, select")
                         if len(inputs) > 2:
                             break
-                        page.wait_for_timeout(300)
+                        page.wait_for_timeout(200)
                 except Exception as e:
                     err_msg = f"Failed to navigate to form for record {record_idx + 1}: {str(e)}"
                     result["results"].append({"record_index": record_idx, "success": False, "errors": [err_msg]})
                     result["errors"].append(err_msg)
                     continue
 
-                # Inject resolveInputLabel function
-                page.evaluate(JS_RESOLVER_DEFINITION)
-                
-                # Scan inputs
-                elements = page.query_selector_all("input, textarea, select")
-                form_fields = []
-                for index, elem in enumerate(elements):
-                    try:
-                        elem_type = elem.get_attribute("type") or "text"
-                        elem_name = elem.get_attribute("name") or ""
-                        elem_id = elem.get_attribute("id") or ""
-                        elem_placeholder = elem.get_attribute("placeholder") or ""
-                        
-                        if elem_type in ("hidden", "submit", "button", "image", "radio", "password"):
-                            continue
+                if cached_form_fields is None:
+                    print("First record: Scanning DOM to build Blueprint...")
+                    # Inject resolveInputLabel function
+                    page.evaluate(JS_RESOLVER_DEFINITION)
+                    
+                    # Scan inputs
+                    elements = page.query_selector_all("input, textarea, select")
+                    form_fields = []
+                    for index, elem in enumerate(elements):
+                        try:
+                            elem_type = elem.get_attribute("type") or "text"
+                            elem_name = elem.get_attribute("name") or ""
+                            elem_id = elem.get_attribute("id") or ""
+                            elem_placeholder = elem.get_attribute("placeholder") or ""
                             
-                        # Skip disabled
-                        is_disabled = elem.is_disabled() or elem.evaluate("el => el.disabled") or elem.evaluate("el => el.classList.contains('Mui-disabled')")
-                        if is_disabled:
-                            continue
+                            if elem_type in ("hidden", "submit", "button", "image", "radio", "password"):
+                                continue
+                                
+                            # Skip disabled
+                            is_disabled = elem.is_disabled() or elem.evaluate("el => el.disabled") or elem.evaluate("el => el.classList.contains('Mui-disabled')")
+                            if is_disabled:
+                                continue
+                                
+                            label_text = page.evaluate("window.resolveInputLabel", elem).strip()
+                            if not label_text:
+                                label_text = page.evaluate(
+                                    "(elem) => { let parent = elem.parentElement; if (!parent) return ''; return parent.innerText.replace(elem.innerText, '').trim().split('\\n')[0]; }",
+                                    elem
+                                ).replace('\u200b', '').replace('\u200c', '').strip().rstrip(":")
                             
-                        label_text = page.evaluate("window.resolveInputLabel", elem).strip()
-                        if not label_text:
-                            label_text = page.evaluate(
-                                "(elem) => { let parent = elem.parentElement; if (!parent) return ''; return parent.innerText.replace(elem.innerText, '').trim().split('\\n')[0]; }",
-                                elem
-                            ).replace('\u200b', '').replace('\u200c', '').strip().rstrip(":")
-                        
-                        if label_text.lower() in ("customer code", "customercode", "gold & silver rate", "rate"):
-                            continue
-                            
-                        selector = ""
-                        if label_text:
-                            selector = f"label:{label_text}"
-                        elif elem_id:
-                            selector = f"#{elem_id}"
-                        elif elem_name:
-                            selector = f"input[name='{elem_name}'], textarea[name='{elem_name}'], select[name='{elem_name}']"
-                        else:
-                            tag = elem.evaluate("(e) => e.tagName.toLowerCase()")
-                            selector = f"{tag}:nth-of-type({index + 1})"
+                            if label_text.lower() in ("customer code", "customercode", "gold & silver rate", "rate"):
+                                continue
+                                
+                            selector = ""
+                            if label_text:
+                                selector = f"label:{label_text}"
+                            elif elem_id:
+                                selector = f"#{elem_id}"
+                            elif elem_name:
+                                selector = f"input[name='{elem_name}'], textarea[name='{elem_name}'], select[name='{elem_name}']"
+                            else:
+                                tag = elem.evaluate("(e) => e.tagName.toLowerCase()")
+                                selector = f"{tag}:nth-of-type({index + 1})"
 
-                        form_fields.append({
-                            "id": elem_id,
-                            "name": elem_name,
-                            "type": elem_type,
-                            "placeholder": elem_placeholder,
-                            "label": label_text or elem_name or elem_id,
-                            "selector": selector
-                        })
-                    except Exception:
-                        pass
+                            form_fields.append({
+                                "id": elem_id,
+                                "name": elem_name,
+                                "type": elem_type,
+                                "placeholder": elem_placeholder,
+                                "label": label_text or elem_name or elem_id,
+                                "selector": selector
+                            })
+                        except Exception:
+                            pass
+                    
+                    cached_form_fields = form_fields
+                    print(f"Blueprint created and cached with {len(cached_form_fields)} fields.")
+                else:
+                    form_fields = cached_form_fields
+                    print("Re-using cached DOM Blueprint.")
 
                 # Map fields
                 mapped_selectors = mapping_engine.map_fields(record, form_fields, db)
@@ -1306,7 +1322,7 @@ class PlaywrightAutomationEngine:
                                     elem.check()
                             elif role_attr == "combobox" or "MuiAutocomplete-input" in class_attr:
                                 elem.click()
-                                page.wait_for_timeout(300)
+                                page.wait_for_timeout(150)
                                 
                                 page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=2000)
                                 option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
@@ -1358,7 +1374,7 @@ class PlaywrightAutomationEngine:
                                         
                                 if not matched:
                                     elem.fill(value)
-                                    page.wait_for_timeout(500)
+                                    page.wait_for_timeout(300)
                                     page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=1500)
                                     option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
                                     count = option_locator.count()
@@ -1381,11 +1397,11 @@ class PlaywrightAutomationEngine:
                                 
                                 # Wait for dynamic sub-options
                                 if "country" in selector_lower or "state" in selector_lower:
-                                    page.wait_for_timeout(1000)
+                                    page.wait_for_timeout(500)
                             else:
                                 elem.click()
                                 elem.fill("")
-                                page.keyboard.type(value, delay=50)
+                                page.keyboard.type(value, delay=10) # Sped up typing
                                 
                             filled_selectors.append(selector)
                     except Exception as ex:
@@ -1417,17 +1433,23 @@ class PlaywrightAutomationEngine:
                 
                 if submit_clicked:
                     try:
-                        page.wait_for_load_state("networkidle", timeout=5000)
+                        page.wait_for_load_state("networkidle", timeout=3000)
                     except Exception:
                         pass
-                    page.wait_for_timeout(4000)
+                    
+                    # Dynamically wait for toast instead of hardcoded 4 seconds
+                    try:
+                        page.wait_for_selector(".MuiAlert-message, .toast, .notification, .alert-success, .Mui-error, .error, .invalid-feedback", timeout=3000)
+                        page.wait_for_timeout(200) # tiny buffer for text to render
+                    except Exception:
+                        page.wait_for_timeout(1000) # fallback wait if no toast caught
                     
                     # Verify submission success
                     success_status, err_msg = self._verify_submission_success(page, url)
                     if not success_status:
                         record_errors.append(err_msg)
                 else:
-                    page.wait_for_timeout(1000)
+                    page.wait_for_timeout(500)
 
                 # Capture verification screenshot of each record submission
                 rec_screenshot_filename = f"screenshot_bulk_{record_idx}.png"
