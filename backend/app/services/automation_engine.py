@@ -515,6 +515,23 @@ class PlaywrightAutomationEngine:
                 print(f"Submission verified: Redirected to {current_url}")
                 return True, ""
                 
+            # 1.5. Check if our MutationObserver caught a fleeting toast right after clicking submit
+            captured_err = page.evaluate("window.__capturedError || null")
+            if captured_err:
+                print(f"Verification caught fleeting error via Observer: '{captured_err}'")
+                # Try to clean up observer
+                page.evaluate("if(window.__toastObserver) { window.__toastObserver.disconnect(); }")
+                return False, f"Form submission failed: {captured_err}"
+                
+            captured_succ = page.evaluate("window.__capturedSuccess || null")
+            if captured_succ:
+                print(f"Verification caught fleeting success via Observer: '{captured_succ}'")
+                page.evaluate("if(window.__toastObserver) { window.__toastObserver.disconnect(); }")
+                return True, ""
+                
+            # Try to clean up observer anyway
+            page.evaluate("if(window.__toastObserver) { window.__toastObserver.disconnect(); }")
+                
             # 2. Check for explicit success toast notifications or alerts
             success_msg = page.evaluate("""() => {
                 let successEls = Array.from(document.querySelectorAll(".MuiAlert-message, .toast, .notification, .alert-success, div"));
@@ -1076,6 +1093,27 @@ class PlaywrightAutomationEngine:
                 try:
                     elem = page.locator(sub_sel).first
                     if elem and elem.is_visible():
+                        page.evaluate("""() => {
+                            window.__capturedError = null;
+                            window.__capturedSuccess = null;
+                            window.__toastObserver = new MutationObserver((mutations) => {
+                                for (let mut of mutations) {
+                                    for (let node of mut.addedNodes) {
+                                        if (node.nodeType === 1) { // ELEMENT_NODE
+                                            let txt = (node.innerText || node.textContent || "").toLowerCase();
+                                            if (txt.length > 5 && txt.length < 150) {
+                                                if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                                    window.__capturedError = (node.innerText || node.textContent).trim();
+                                                } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
+                                                    window.__capturedSuccess = (node.innerText || node.textContent).trim();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            window.__toastObserver.observe(document.body, { childList: true, subtree: true });
+                        }""")
                         elem.click(force=True)
                         submit_clicked = True
                         print(f"Auto-clicked submit button using selector: {sub_sel}")
@@ -1465,6 +1503,29 @@ class PlaywrightAutomationEngine:
                     try:
                         elem = page.locator(sub_sel).first
                         if elem and elem.is_visible():
+                            # Inject toast listener BEFORE clicking submit to catch fleeting toasts
+                            page.evaluate("""() => {
+                                window.__capturedError = null;
+                                window.__capturedSuccess = null;
+                                window.__toastObserver = new MutationObserver((mutations) => {
+                                    for (let mut of mutations) {
+                                        for (let node of mut.addedNodes) {
+                                            if (node.nodeType === 1) { // ELEMENT_NODE
+                                                let txt = (node.innerText || node.textContent || "").toLowerCase();
+                                                if (txt.length > 5 && txt.length < 150) {
+                                                    if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                                        window.__capturedError = (node.innerText || node.textContent).trim();
+                                                    } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
+                                                        window.__capturedSuccess = (node.innerText || node.textContent).trim();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                });
+                                window.__toastObserver.observe(document.body, { childList: true, subtree: true });
+                            }""")
+                            
                             elem.click()
                             submit_clicked = True
                             print(f"Auto-clicked submit/create button for record {record_idx + 1}.")
