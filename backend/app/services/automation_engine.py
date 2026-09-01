@@ -1356,63 +1356,42 @@ class PlaywrightAutomationEngine:
                                     elem.check()
                             elif role_attr == "combobox" or "MuiAutocomplete-input" in class_attr:
                                 elem.click()
-                                page.wait_for_timeout(150)
+                                page.wait_for_timeout(300)
                                 
-                                page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=2000)
-                                option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
-                                count = option_locator.count()
                                 matched = False
                                 val_norm = re.sub(r'[^a-z0-9]', '', value.lower())
                                 
-                                # Exact match
-                                for idx in range(count):
-                                    opt = option_locator.nth(idx)
-                                    opt_text = opt.inner_text().strip()
-                                    opt_norm = re.sub(r'[^a-z0-9]', '', opt_text.lower())
-                                    if opt_norm == val_norm:
-                                        opt.click()
-                                        matched = True
-                                        break
-                                        
-                                # Substring match
-                                if not matched:
+                                try:
+                                    page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=2000)
+                                    option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
+                                    count = option_locator.count()
+                                    
+                                    # Exact match
                                     for idx in range(count):
                                         opt = option_locator.nth(idx)
                                         opt_text = opt.inner_text().strip()
                                         opt_norm = re.sub(r'[^a-z0-9]', '', opt_text.lower())
-                                        if val_norm in opt_norm or opt_norm in val_norm:
+                                        if opt_norm == val_norm:
                                             opt.click()
                                             matched = True
                                             break
                                             
-                                # Fuzzy Levenshtein match
-                                if not matched:
-                                    best_opt = None
-                                    best_sim = 0.0
-                                    best_text = ""
-                                    for idx in range(count):
-                                        opt = option_locator.nth(idx)
-                                        opt_text = opt.inner_text().strip()
-                                        opt_norm = re.sub(r'[^a-z0-9]', '', opt_text.lower())
-                                        dist = levenshtein_distance(val_norm, opt_norm)
-                                        max_len = max(len(val_norm), len(opt_norm))
-                                        sim = 1.0 - (dist / max_len) if max_len > 0 else 0.0
-                                        if sim > best_sim:
-                                            best_sim = sim
-                                            best_opt = opt
-                                            best_text = opt_text
-                                            
-                                    if best_sim >= 0.65:
-                                        best_opt.click()
-                                        matched = True
-                                        
-                                if not matched:
-                                    elem.fill(value)
-                                    page.wait_for_timeout(300)
-                                    page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=1500)
-                                    option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
-                                    count = option_locator.count()
-                                    if count > 0:
+                                    # Substring match
+                                    if not matched:
+                                        for idx in range(count):
+                                            opt = option_locator.nth(idx)
+                                            opt_text = opt.inner_text().strip()
+                                            opt_norm = re.sub(r'[^a-z0-9]', '', opt_text.lower())
+                                            if val_norm in opt_norm or opt_norm in val_norm:
+                                                opt.click()
+                                                matched = True
+                                                break
+                                                
+                                    # Fuzzy Levenshtein match
+                                    if not matched:
+                                        best_opt = None
+                                        best_sim = 0.0
+                                        best_text = ""
                                         for idx in range(count):
                                             opt = option_locator.nth(idx)
                                             opt_text = opt.inner_text().strip()
@@ -1420,13 +1399,41 @@ class PlaywrightAutomationEngine:
                                             dist = levenshtein_distance(val_norm, opt_norm)
                                             max_len = max(len(val_norm), len(opt_norm))
                                             sim = 1.0 - (dist / max_len) if max_len > 0 else 0.0
-                                            if opt_norm == val_norm or val_norm in opt_norm or opt_norm in val_norm or sim >= 0.65:
-                                                opt.click()
-                                                matched = True
-                                                break
-                                        if not matched:
-                                            option_locator.first.click()
-                                    else:
+                                            if sim > best_sim:
+                                                best_sim = sim
+                                                best_opt = opt
+                                                best_text = opt_text
+                                                
+                                        if best_sim >= 0.65:
+                                            best_opt.click()
+                                            matched = True
+                                except Exception:
+                                    pass # Initial options didn't appear, proceed to fill manually
+                                        
+                                if not matched:
+                                    elem.fill(value)
+                                    page.wait_for_timeout(500)
+                                    try:
+                                        page.wait_for_selector("li[role='option'], .MuiAutocomplete-option", timeout=2500)
+                                        option_locator = page.locator("li[role='option'], .MuiAutocomplete-option")
+                                        count = option_locator.count()
+                                        if count > 0:
+                                            for idx in range(count):
+                                                opt = option_locator.nth(idx)
+                                                opt_text = opt.inner_text().strip()
+                                                opt_norm = re.sub(r'[^a-z0-9]', '', opt_text.lower())
+                                                dist = levenshtein_distance(val_norm, opt_norm)
+                                                max_len = max(len(val_norm), len(opt_norm))
+                                                sim = 1.0 - (dist / max_len) if max_len > 0 else 0.0
+                                                if opt_norm == val_norm or val_norm in opt_norm or opt_norm in val_norm or sim >= 0.65:
+                                                    opt.click()
+                                                    matched = True
+                                                    break
+                                            if not matched:
+                                                option_locator.first.click()
+                                        else:
+                                            page.keyboard.press("Enter")
+                                    except Exception:
                                         page.keyboard.press("Enter")
                                 
                                 # Wait for dynamic sub-options
@@ -1627,7 +1634,7 @@ class PlaywrightAutomationEngine:
                             err_lower = err_str.lower()
                             
                             # Check against expanded duplicate keywords
-                            duplicate_keywords = ["already exist", "duplicate", "already taken", "already present", "already in use", "has been taken"]
+                            duplicate_keywords = ["already exist", "duplicate", "already taken", "already present", "already in use", "has been taken", "registered"]
                             
                             if any(kw in err_lower for kw in duplicate_keywords) or ("exists" in err_lower and "does not" not in err_lower):
                                 report_column.append("Already Existed")
