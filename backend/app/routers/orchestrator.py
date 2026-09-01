@@ -2,6 +2,7 @@ import os
 import uuid
 import pandas as pd
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import Dict, Any, List
 from pydantic import BaseModel
@@ -120,12 +121,18 @@ def get_workbook_details(workbook_id: str, db: Session = Depends(get_db)):
             "target_url": job.target_url if job else None,
             "record_count": record_count
         })
+        
+    base_dir = os.path.dirname(workbook.storage_path)
+    original_filename = os.path.basename(workbook.storage_path)
+    result_path = os.path.join(base_dir, f"result_{original_filename}")
+    has_report = os.path.exists(result_path)
 
     return {
         "id": workbook.id,
         "filename": workbook.filename,
         "status": workbook.status,
         "created_at": workbook.created_at,
+        "has_report": has_report,
         "sheets": sheets_data
     }
 
@@ -168,6 +175,26 @@ def start_orchestration(workbook_id: str, request: StartOrchestratorRequest, db:
     db.commit()
 
     return results
+
+@router.get("/download_report/{workbook_id}")
+def download_report(workbook_id: str, db: Session = Depends(get_db)):
+    workbook = db.query(Workbook).filter(Workbook.id == workbook_id).first()
+    if not workbook:
+        raise HTTPException(status_code=404, detail="Workbook not found")
+        
+    base_dir = os.path.dirname(workbook.storage_path)
+    original_filename = os.path.basename(workbook.storage_path)
+    result_filename = f"result_{original_filename}"
+    result_path = os.path.join(base_dir, result_filename)
+    
+    if not os.path.exists(result_path):
+        raise HTTPException(status_code=404, detail="Report not yet generated or not found on disk")
+        
+    return FileResponse(
+        path=result_path, 
+        filename=result_filename,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 @router.delete("/workbook/{workbook_id}")
 def delete_workbook(workbook_id: str, db: Session = Depends(get_db)):

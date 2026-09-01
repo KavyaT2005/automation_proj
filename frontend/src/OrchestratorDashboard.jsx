@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { UploadCloud, Layers, Play, CheckCircle, RefreshCw, Server, AlertCircle, Trash2 } from 'lucide-react';
+import { UploadCloud, Layers, Play, CheckCircle, RefreshCw, Server, AlertCircle, Trash2, Download } from 'lucide-react';
 
 export default function OrchestratorDashboard({ secureFetch, addLog }) {
   const [workbooks, setWorkbooks] = useState([]);
@@ -136,6 +136,30 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
     }
   };
 
+  const downloadReport = async () => {
+    if (!selectedWorkbookId) return;
+    try {
+      const res = await secureFetch(`/api/v1/orchestrator/download_report/${selectedWorkbookId}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.style.display = 'none';
+        a.href = url;
+        a.download = `result_${workbookDetails.filename}`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        addLog(`Downloaded Execution Report for ${workbookDetails.filename}`, 'sys');
+      } else {
+        alert("Failed to download report. It may not be generated yet.");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("Error downloading report");
+    }
+  };
+
   return (
     <div className="flex flex-col gap-6">
       {/* Upper row: Upload & List */}
@@ -243,6 +267,15 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                   <Play className="w-3 h-3" />
                   START MASTER AUTOMATION
                 </button>
+                {workbookDetails.has_report && (
+                  <button 
+                    onClick={downloadReport}
+                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded text-[10px] font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Download className="w-3 h-3" />
+                    DOWNLOAD REPORT
+                  </button>
+                )}
               </div>
             )}
           </div>

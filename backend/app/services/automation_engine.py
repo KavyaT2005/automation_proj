@@ -1454,10 +1454,23 @@ class PlaywrightAutomationEngine:
         Maintains a global memory to auto-fill dependent sheets (e.g., fetching 
         customer name based on phone number provided in the Saving Scheme sheet).
         """
-        from ..models.orchestrator import WorkbookSheet, AutomationJob, AutomationRecord, ExecutionLog
+        from ..models.orchestrator import Workbook, WorkbookSheet, AutomationJob, AutomationRecord, ExecutionLog
         import os
+        import pandas as pd
         from ..config import settings
         
+        # Fetch the workbook to get storage path
+        workbook = db.query(Workbook).filter(Workbook.id == workbook_id).first()
+        if not workbook:
+            return {"success": False, "message": "Workbook not found"}
+
+        # Load original excel data to append report column later
+        try:
+            excel_data = pd.read_excel(workbook.storage_path, sheet_name=None, dtype=str)
+        except Exception as e:
+            print(f"Error loading original Excel file for reporting: {e}")
+            excel_data = {}
+
         # 1. Fetch all sheets in the workbook
         sheets = db.query(WorkbookSheet).filter(WorkbookSheet.workbook_id == workbook_id).all()
         if not sheets:
@@ -1536,16 +1549,46 @@ class PlaywrightAutomationEngine:
                 
                 # Update record statuses based on results
                 fill_results = sheet_res.get("results", [])
+                
+                # Create a list to store report statuses for this sheet
+                report_column = []
+                
                 for idx, r in enumerate(records):
                     if idx < len(fill_results):
-                        if fill_results[idx].get("success"):
+                        is_success = fill_results[idx].get("success")
+                        if is_success:
                             r.status = "success"
+                            report_column.append("Created Successfully")
                         else:
                             r.status = "failed"
                             # log the error
                             err_msgs = fill_results[idx].get("errors", [])
-                            err_log = ExecutionLog(record_id=r.id, log_level="error", message="; ".join(err_msgs))
+                            err_str = "; ".join(err_msgs)
+                            err_log = ExecutionLog(record_id=r.id, log_level="error", message=err_str)
                             db.add(err_log)
+                            
+                            # Determine user-friendly report text
+                            err_lower = err_str.lower()
+                            if "already exist" in err_lower or "duplicate" in err_lower or "already taken" in err_lower:
+                                report_column.append("Already Existed")
+                            elif "required" in err_lower or "invalid or missing" in err_lower:
+                                report_column.append(f"Missing/Invalid Fields: {err_str}")
+                            else:
+                                report_column.append(f"Failed: {err_str}")
+                    else:
+                        report_column.append("Skipped/No Result")
+                
+                # Attach the report column to the pandas dataframe for this sheet
+                if sheet.sheet_name in excel_data:
+                    df = excel_data[sheet.sheet_name]
+                    # Ensure report_column matches dataframe length
+                    if len(report_column) < len(df):
+                        report_column.extend([""] * (len(df) - len(report_column)))
+                    elif len(report_column) > len(df):
+                        report_column = report_column[:len(df)]
+                        
+                    df["Execution Report"] = report_column
+                    excel_data[sheet.sheet_name] = df
                 
                 job.status = "completed" if sheet_res["success"] else "completed_with_errors"
                 db.commit()
@@ -1559,5 +1602,47 @@ class PlaywrightAutomationEngine:
                 job.status = "failed"
                 db.commit()
                 results["logs"].append(f"Failed sheet '{sheet.sheet_name}': {str(e)}")
+                
+        # Save the updated Excel file
+        if excel_data:
+            try:
+                base_dir = os.path.dirname(workbook.storage_path)
+                original_filename = os.path.basename(workbook.storage_path)
+                result_filename = f"result_{original_filename}"
+                result_path = os.path.join(base_dir, result_filename)
+                
+                from openpyxl.styles import Font
+                with pd.ExcelWriter(result_path, engine='openpyxl') as writer:
+                    for sheet_name, df in excel_data.items():
+                        df.to_excel(writer, sheet_name=sheet_name, index=False)
+                        
+                        # Apply color formatting to Execution Report column
+                        try:
+                            worksheet = writer.sheets[sheet_name]
+                            report_col_idx = None
+                            for col_idx, col_name in enumerate(df.columns, start=1):
+                                if col_name == "Execution Report":
+                                    report_col_idx = col_idx
+                                    # Make column a bit wider for readability
+                                    col_letter = worksheet.cell(row=1, column=col_idx).column_letter
+                                    worksheet.column_dimensions[col_letter].width = 35
+                                    break
+                                    
+                            if report_col_idx:
+                                for row_idx in range(2, len(df) + 2):
+                                    cell = worksheet.cell(row=row_idx, column=report_col_idx)
+                                    val = str(cell.value or "").lower()
+                                    if "created successfully" in val:
+                                        cell.font = Font(color="008000", bold=True) # Green
+                                    elif "already existed" in val:
+                                        cell.font = Font(color="D97706", bold=True) # Amber/Orange
+                                    elif "failed" in val or "missing" in val or "invalid" in val:
+                                        cell.font = Font(color="DC2626", bold=True) # Red
+                        except Exception as fmt_e:
+                            print(f"Warning: Failed to format sheet {sheet_name}: {fmt_e}")
+                
+                print(f"Successfully generated execution report: {result_path}")
+            except Exception as ex:
+                print(f"Failed to save result Excel file: {ex}")
                 
         return results
