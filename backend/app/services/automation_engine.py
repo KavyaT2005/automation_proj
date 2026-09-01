@@ -534,12 +534,12 @@ class PlaywrightAutomationEngine:
                 
             # 3. Check for explicit validation/submission error messages on screen
             error_msg = page.evaluate("""() => {
-                // Check Mui-error or error classes AND toast notifications
+                // First check explicit error classes and toast classes
                 let errorEls = Array.from(document.querySelectorAll(".Mui-error, .error, .invalid-feedback, .error-message, .alert-danger, .MuiAlert-message, .toast, .notification"));
                 
                 let visibleErrors = errorEls.filter(el => {
                     let style = window.getComputedStyle(el);
-                    return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
+                    return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0 && el.innerText.trim() !== "";
                 });
                 
                 if (visibleErrors.length > 0) {
@@ -557,6 +557,25 @@ class PlaywrightAutomationEngine:
                     let uniq = Array.from(new Set(trueErrors));
                     if (uniq.length > 0) {
                         return uniq.join("; ");
+                    }
+                }
+                
+                // If no explicit error classes caught it, scan ALL visible divs/spans for explicit error keywords
+                // (This catches poorly-coded ERPs that throw toasts in random divs)
+                let allEls = Array.from(document.querySelectorAll("div, span, p"));
+                for (let el of allEls) {
+                    let txt = (el.innerText || "").toLowerCase().trim();
+                    if (txt.length > 5 && txt.length < 150) { // Toasts are usually short
+                        let style = window.getComputedStyle(el);
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0) {
+                            // Check for strict explicit error keywords
+                            if (txt.includes("already exist") || txt.includes("already taken") || 
+                                txt.includes("already present") || txt.includes("duplicate") || 
+                                txt.includes("has been taken") || txt.includes("already in use") ||
+                                (txt.includes("exists") && !txt.includes("does not"))) {
+                                return el.innerText.trim(); // Found it!
+                            }
+                        }
                     }
                 }
                 
@@ -1606,7 +1625,11 @@ class PlaywrightAutomationEngine:
                             
                             # Determine user-friendly report text
                             err_lower = err_str.lower()
-                            if "already exist" in err_lower or "duplicate" in err_lower or "already taken" in err_lower:
+                            
+                            # Check against expanded duplicate keywords
+                            duplicate_keywords = ["already exist", "duplicate", "already taken", "already present", "already in use", "has been taken"]
+                            
+                            if any(kw in err_lower for kw in duplicate_keywords) or ("exists" in err_lower and "does not" not in err_lower):
                                 report_column.append("Already Existed")
                             elif "required" in err_lower or "invalid or missing" in err_lower:
                                 report_column.append(f"Missing/Invalid Fields: {err_str}")
