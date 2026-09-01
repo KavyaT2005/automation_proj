@@ -1758,16 +1758,11 @@ class PlaywrightAutomationEngine:
             has_failures = any(r.status == "failed" for r in all_records)
             job.status = "completed_with_errors" if has_failures else "completed"
             db.commit()
-                results["sheets_processed"] += 1
-                successes = len([r for r in fill_results if r.get('success')])
-                failures = len(fill_results) - successes
-                results["logs"].append(f"Completed sheet '{sheet.sheet_name}': {successes} successes, {failures} failures")
-                
-            except Exception as e:
-                print(f"Error orchestrating sheet '{sheet.sheet_name}': {e}")
-                job.status = "failed"
-                db.commit()
-                results["logs"].append(f"Failed sheet '{sheet.sheet_name}': {str(e)}")
+            
+            results["sheets_processed"] += 1
+            successes = len([r for r in fill_results if r.get('success')])
+            failures = len(fill_results) - successes
+            results["logs"].append(f"Completed sheet '{sheet.sheet_name}': {successes} successes, {failures} failures")
                 
         # Save the updated Excel file
         if excel_data:
