@@ -593,6 +593,10 @@ class PlaywrightAutomationEngine:
                                 (txt.includes("exists") && !txt.includes("does not"))) {
                                 return el.innerText.trim(); // Found it!
                             }
+                            // Catch "is required" or "cannot be empty" validation errors
+                            if (txt.includes("is required") || txt.includes("cannot be empty") || txt.includes("invalid format") || txt.includes("mandatory field")) {
+                                return el.innerText.trim();
+                            }
                         }
                     }
                 }
@@ -1102,7 +1106,7 @@ class PlaywrightAutomationEngine:
                                 if (node && node.nodeType === 1) {
                                     let txt = (node.innerText || node.textContent || "").toLowerCase();
                                     if (txt.length > 5 && txt.length < 150) {
-                                        if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                        if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed") || txt.includes("required") || txt.includes("empty")) {
                                             window.__capturedError = (node.innerText || node.textContent).trim();
                                         } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
                                             window.__capturedSuccess = (node.innerText || node.textContent).trim();
@@ -1521,7 +1525,7 @@ class PlaywrightAutomationEngine:
                                     if (node && node.nodeType === 1) {
                                         let txt = (node.innerText || node.textContent || "").toLowerCase();
                                         if (txt.length > 5 && txt.length < 150) {
-                                            if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                            if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed") || txt.includes("required") || txt.includes("empty")) {
                                                 window.__capturedError = (node.innerText || node.textContent).trim();
                                             } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
                                                 window.__capturedSuccess = (node.innerText || node.textContent).trim();
@@ -1756,7 +1760,11 @@ class PlaywrightAutomationEngine:
             
             # Check if there are any remaining failed records
             has_failures = any(r.status == "failed" for r in all_records)
-            job.status = "completed_with_errors" if has_failures else "completed"
+            if has_failures:
+                job.status = "completed_with_errors"
+                results["success"] = False
+            else:
+                job.status = "completed"
             db.commit()
             
             results["sheets_processed"] += 1
