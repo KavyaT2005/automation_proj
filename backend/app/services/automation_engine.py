@@ -1589,7 +1589,7 @@ class PlaywrightAutomationEngine:
             
         return result
 
-    def run_orchestrator_job(self, workbook_id: str, mapping_engine: Any, db: Any, base_url: str = None) -> Dict[str, Any]:
+    def run_orchestrator_job(self, workbook_id: str, mapping_engine: Any, db: Any, base_url: str = None, retry_failed_only: bool = False) -> Dict[str, Any]:
         """
         Executes automation for an entire multi-sheet workbook sequentially.
         Maintains a global memory to auto-fill dependent sheets (e.g., fetching 
@@ -1636,107 +1636,128 @@ class PlaywrightAutomationEngine:
             db.commit()
                 
             # 3. Fetch all records for this job
-            records = db.query(AutomationRecord).filter(AutomationRecord.job_id == job.id).order_by(AutomationRecord.row_index).all()
+            if retry_failed_only:
+                records = db.query(AutomationRecord).filter(
+                    AutomationRecord.job_id == job.id,
+                    AutomationRecord.status == "failed"
+                ).order_by(AutomationRecord.row_index).all()
+            else:
+                records = db.query(AutomationRecord).filter(AutomationRecord.job_id == job.id).order_by(AutomationRecord.row_index).all()
+                
             if not records:
-                continue
+                print(f"No records to process for sheet '{sheet.sheet_name}'.")
+                # Still need to generate the report column for this sheet
+                pass
+            else:
+                print(f"Starting orchestration for sheet '{sheet.sheet_name}' with {len(records)} records...")
                 
-            print(f"Starting orchestration for sheet '{sheet.sheet_name}' with {len(records)} records...")
-            
-            # 4. Extract data in the format expected by fill_form_bulk
-            record_dicts = [r.extracted_data for r in records]
-            
-            # 4.5. Cross-sheet Auto-fill (Relational Memory)
-            for rec in record_dicts:
-                unique_ids = []
-                for k, v in rec.items():
-                    clean_k = k.lower().replace(" ", "_").strip()
-                    val_str = str(v).strip()
-                    # Identify primary keys
-                    if clean_k in ["mobile_number", "mobile", "phone", "phone_number", "contact_no", "email", "customer_code", "pan_no", "pan", "gstin", "gstin_no"] and len(val_str) > 3:
-                        unique_ids.append(val_str)
+                # 4. Extract data in the format expected by fill_form_bulk
+                record_dicts = [r.extracted_data for r in records]
                 
-                # Find if any of these IDs exist in our global memory
-                matched_memory = None
-                for uid in unique_ids:
-                    if uid in global_customer_cache:
-                        matched_memory = global_customer_cache[uid]
-                        break
+                # 4.5. Cross-sheet Auto-fill (Relational Memory)
+                for rec in record_dicts:
+                    unique_ids = []
+                    for k, v in rec.items():
+                        clean_k = k.lower().replace(" ", "_").strip()
+                        val_str = str(v).strip()
+                        # Identify primary keys
+                        if clean_k in ["mobile_number", "mobile", "phone", "phone_number", "contact_no", "email", "customer_code", "pan_no", "pan", "gstin", "gstin_no"] and len(val_str) > 3:
+                            unique_ids.append(val_str)
+                    
+                    # Find if any of these IDs exist in our global memory
+                    matched_memory = None
+                    for uid in unique_ids:
+                        if uid in global_customer_cache:
+                            matched_memory = global_customer_cache[uid]
+                            break
+                    
+                    if matched_memory:
+                        # Enrich current record with missing data from memory
+                        for mem_k, mem_v in matched_memory.items():
+                            if (mem_k not in rec or not str(rec.get(mem_k, "")).strip()) and mem_v:
+                                rec[mem_k] = mem_v
+                    
+                    # Update memory with the enriched record for ALL its unique IDs
+                    for uid in unique_ids:
+                        if uid not in global_customer_cache:
+                            global_customer_cache[uid] = {}
+                        global_customer_cache[uid].update(rec)
                 
-                if matched_memory:
-                    # Enrich current record with missing data from memory
-                    for mem_k, mem_v in matched_memory.items():
-                        if (mem_k not in rec or not str(rec.get(mem_k, "")).strip()) and mem_v:
-                            rec[mem_k] = mem_v
+                screenshot_dir = os.path.join(settings.UPLOAD_DIR, "screenshots", "orchestrator", workbook_id, sheet.sheet_name)
+                os.makedirs(screenshot_dir, exist_ok=True)
                 
-                # Update memory with the enriched record for ALL its unique IDs
-                for uid in unique_ids:
-                    if uid not in global_customer_cache:
-                        global_customer_cache[uid] = {}
-                    global_customer_cache[uid].update(rec)
-            
-            screenshot_dir = os.path.join(settings.UPLOAD_DIR, "screenshots", "orchestrator", workbook_id, sheet.sheet_name)
-            os.makedirs(screenshot_dir, exist_ok=True)
-            
-            # Execute bulk fill for this sheet
-            try:
-                sheet_res = self.fill_form_bulk(
-                    url=target_url,
-                    records=record_dicts,
-                    mapping_engine=mapping_engine,
-                    db=db,
-                    screenshot_dir=screenshot_dir,
-                    module_name=sheet.sheet_name
-                )
+                fill_results = []
                 
-                # Update record statuses based on results
-                fill_results = sheet_res.get("results", [])
-                
-                # Create a list to store report statuses for this sheet
-                report_column = []
-                
-                for idx, r in enumerate(records):
-                    if idx < len(fill_results):
-                        is_success = fill_results[idx].get("success")
-                        if is_success:
-                            r.status = "success"
-                            report_column.append("Created Successfully")
-                        else:
-                            r.status = "failed"
-                            # log the error
-                            err_msgs = fill_results[idx].get("errors", [])
-                            err_str = "; ".join(err_msgs)
-                            err_log = ExecutionLog(record_id=r.id, log_level="error", message=err_str)
-                            db.add(err_log)
-                            
-                            # Determine user-friendly report text
-                            err_lower = err_str.lower()
-                            
-                            # Check against expanded duplicate keywords
-                            duplicate_keywords = ["already exist", "duplicate", "already taken", "already present", "already in use", "has been taken", "registered"]
-                            
-                            if any(kw in err_lower for kw in duplicate_keywords) or ("exists" in err_lower and "does not" not in err_lower):
-                                report_column.append("Already Existed")
-                            elif "required" in err_lower or "invalid or missing" in err_lower:
-                                report_column.append(f"Missing/Invalid Fields: {err_str}")
+                # Execute bulk fill for this sheet
+                try:
+                    sheet_res = self.fill_form_bulk(
+                        url=target_url,
+                        records=record_dicts,
+                        mapping_engine=mapping_engine,
+                        db=db,
+                        screenshot_dir=screenshot_dir,
+                        module_name=sheet.sheet_name
+                    )
+                    
+                    # Update record statuses in database based on results
+                    fill_results = sheet_res.get("results", [])
+                    
+                    for idx, r in enumerate(records):
+                        if idx < len(fill_results):
+                            is_success = fill_results[idx].get("success")
+                            if is_success:
+                                r.status = "success"
                             else:
-                                report_column.append(f"Failed: {err_str}")
+                                r.status = "failed"
+                                # log the error
+                                err_msgs = fill_results[idx].get("errors", [])
+                                err_str = "; ".join(err_msgs)
+                                err_log = ExecutionLog(record_id=r.id, log_level="error", message=err_str)
+                                db.add(err_log)
+                    db.commit()
+                except Exception as e:
+                    print(f"Error orchestrating sheet '{sheet.sheet_name}': {e}")
+                    results["logs"].append(f"Failed sheet '{sheet.sheet_name}': {str(e)}")
+
+            # --- Generate Excel Report using the Database Truth ---
+            # Fetch ALL records (not just the failed ones we might have retried)
+            all_records = db.query(AutomationRecord).filter(AutomationRecord.job_id == job.id).order_by(AutomationRecord.row_index).all()
+            report_column = []
+            
+            for r in all_records:
+                if r.status == "success":
+                    report_column.append("Created Successfully")
+                elif r.status == "failed":
+                    err_log = db.query(ExecutionLog).filter(ExecutionLog.record_id == r.id).order_by(ExecutionLog.created_at.desc()).first()
+                    err_str = err_log.message if err_log else "Unknown Error"
+                    err_lower = err_str.lower()
+                    
+                    duplicate_keywords = ["already exist", "duplicate", "already taken", "already present", "already in use", "has been taken", "registered"]
+                    
+                    if any(kw in err_lower for kw in duplicate_keywords) or ("exists" in err_lower and "does not" not in err_lower):
+                        report_column.append("Already Existed")
+                    elif "required" in err_lower or "invalid or missing" in err_lower:
+                        report_column.append(f"Missing/Invalid Fields: {err_str}")
                     else:
-                        report_column.append("Skipped/No Result")
-                
-                # Attach the report column to the pandas dataframe for this sheet
-                if sheet.sheet_name in excel_data:
-                    df = excel_data[sheet.sheet_name]
-                    # Ensure report_column matches dataframe length
-                    if len(report_column) < len(df):
-                        report_column.extend([""] * (len(df) - len(report_column)))
-                    elif len(report_column) > len(df):
-                        report_column = report_column[:len(df)]
-                        
-                    df["Execution Report"] = report_column
-                    excel_data[sheet.sheet_name] = df
-                
-                job.status = "completed" if sheet_res["success"] else "completed_with_errors"
-                db.commit()
+                        report_column.append(f"Failed: {err_str}")
+                else:
+                    report_column.append("Skipped/Pending")
+            
+            # Attach the report column to the pandas dataframe for this sheet
+            if sheet.sheet_name in excel_data:
+                df = excel_data[sheet.sheet_name]
+                if len(report_column) < len(df):
+                    report_column.extend([""] * (len(df) - len(report_column)))
+                elif len(report_column) > len(df):
+                    report_column = report_column[:len(df)]
+                    
+                df["Execution Report"] = report_column
+                excel_data[sheet.sheet_name] = df
+            
+            # Check if there are any remaining failed records
+            has_failures = any(r.status == "failed" for r in all_records)
+            job.status = "completed_with_errors" if has_failures else "completed"
+            db.commit()
                 results["sheets_processed"] += 1
                 successes = len([r for r in fill_results if r.get('success')])
                 failures = len(fill_results) - successes

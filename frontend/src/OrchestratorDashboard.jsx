@@ -107,13 +107,18 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
 
   // Target config is now set via baseAppUrl globally
 
-  const startOrchestration = async () => {
+  const startOrchestration = async (retryFailed = false) => {
     if (!selectedWorkbookId) return;
     if (!baseAppUrl) {
       alert("Please provide the Base Application URL first.");
       return;
     }
-    addLog(`Initiating master orchestration for workbook ID: ${selectedWorkbookId}`, 'sys');
+    
+    if (retryFailed) {
+      addLog(`Initiating retry for failed records in workbook ID: ${selectedWorkbookId}`, 'sys');
+    } else {
+      addLog(`Initiating master orchestration for workbook ID: ${selectedWorkbookId}`, 'sys');
+    }
     
     // Optimistic state
     setWorkbookDetails(prev => ({ ...prev, status: 'running' }));
@@ -122,17 +127,17 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
       const res = await secureFetch(`/api/v1/orchestrator/start/${selectedWorkbookId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ base_url: baseAppUrl })
+        body: JSON.stringify({ base_url: baseAppUrl, retry_failed: retryFailed })
       });
       if (res.ok) {
         const data = await res.json();
-        addLog(`Master orchestration completed. Processed ${data.sheets_processed} sheets.`, 'sys');
+        addLog(`Orchestration completed. Processed ${data.sheets_processed} sheets.`, 'sys');
         fetchWorkbookDetails(selectedWorkbookId);
       } else {
         alert("Automation API failed with status " + res.status);
       }
     } catch (e) {
-      addLog(`Master orchestration failed.`, 'err');
+      addLog(`Orchestration failed.`, 'err');
     }
   };
 
@@ -251,7 +256,7 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                 ORCHESTRATION IN PROGRESS
               </div>
             ) : (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <input 
                   type="text" 
                   value={baseAppUrl}
@@ -260,13 +265,25 @@ export default function OrchestratorDashboard({ secureFetch, addLog }) {
                   className="input-glass text-xs w-[250px]"
                 />
                 <button 
-                  onClick={startOrchestration}
+                  onClick={() => startOrchestration(false)}
                   disabled={workbookDetails.status === 'running' || !baseAppUrl}
                   className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[10px] font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Play className="w-3 h-3" />
                   START MASTER AUTOMATION
                 </button>
+                
+                {workbookDetails.status === 'completed_with_errors' && (
+                  <button 
+                    onClick={() => startOrchestration(true)}
+                    disabled={workbookDetails.status === 'running' || !baseAppUrl}
+                    className="px-4 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[10px] font-bold flex items-center gap-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    RETRY FAILED RECORDS
+                  </button>
+                )}
+
                 {workbookDetails.has_report && (
                   <button 
                     onClick={downloadReport}

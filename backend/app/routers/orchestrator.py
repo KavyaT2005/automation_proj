@@ -158,6 +158,7 @@ mapping_engine = FieldMappingEngine()
 
 class StartOrchestratorRequest(BaseModel):
     base_url: str
+    retry_failed: bool = False
 
 @router.post("/start/{workbook_id}")
 def start_orchestration(workbook_id: str, request: StartOrchestratorRequest, db: Session = Depends(get_db)):
@@ -168,8 +169,14 @@ def start_orchestration(workbook_id: str, request: StartOrchestratorRequest, db:
     workbook.status = "running"
     db.commit()
 
-    # Pass the base_url to the engine
-    results = automation_engine.run_orchestrator_job(workbook_id, mapping_engine, db, base_url=request.base_url)
+    # Pass the base_url and retry_failed to the engine
+    results = automation_engine.run_orchestrator_job(
+        workbook_id, 
+        mapping_engine, 
+        db, 
+        base_url=request.base_url,
+        retry_failed_only=request.retry_failed
+    )
 
     workbook.status = "completed" if results["success"] else "completed_with_errors"
     db.commit()
