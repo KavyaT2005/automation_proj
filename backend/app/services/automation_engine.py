@@ -1189,10 +1189,11 @@ class PlaywrightAutomationEngine:
                     result["errors"].append(err_msg)
                     continue
 
+                # We must inject this on EVERY record because page.goto (reloads) erase injected window functions!
+                page.evaluate(JS_RESOLVER_DEFINITION)
+
                 if cached_form_fields is None:
                     print("First record: Scanning DOM to build Blueprint...")
-                    # Inject resolveInputLabel function
-                    page.evaluate(JS_RESOLVER_DEFINITION)
                     
                     # Scan inputs
                     elements = page.query_selector_all("input, textarea, select")
