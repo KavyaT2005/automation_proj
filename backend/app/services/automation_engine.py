@@ -509,13 +509,7 @@ class PlaywrightAutomationEngine:
         success alerts, or validation error messages on the screen.
         """
         try:
-            # 1. Check if the URL has changed (redirected to list or dashboard)
-            current_url = page.url
-            if current_url != original_url:
-                print(f"Submission verified: Redirected to {current_url}")
-                return True, ""
-                
-            # 1.5. Check if our MutationObserver caught a fleeting toast right after clicking submit
+            # 1. Check if our MutationObserver caught a fleeting toast right after clicking submit
             captured_err = page.evaluate("window.__capturedError || null")
             if captured_err:
                 print(f"Verification caught fleeting error via Observer: '{captured_err}'")
@@ -531,8 +525,15 @@ class PlaywrightAutomationEngine:
                 
             # Try to clean up observer anyway
             page.evaluate("if(window.__toastObserver) { window.__toastObserver.disconnect(); }")
+
+            # 2. Check if the URL has changed (redirected to list or dashboard)
+            # (We check this AFTER checking for captured errors, in case the site redirects on error)
+            current_url = page.url
+            if current_url != original_url:
+                print(f"Submission verified: Redirected to {current_url}")
+                return True, ""
                 
-            # 2. Check for explicit success toast notifications or alerts
+            # 3. Check for explicit success toast notifications or alerts
             success_msg = page.evaluate("""() => {
                 let successEls = Array.from(document.querySelectorAll(".MuiAlert-message, .toast, .notification, .alert-success, div"));
                 for (let el of successEls) {
@@ -1096,23 +1097,31 @@ class PlaywrightAutomationEngine:
                         page.evaluate("""() => {
                             window.__capturedError = null;
                             window.__capturedSuccess = null;
+                            
+                            function scanNodeForToast(node) {
+                                if (node && node.nodeType === 1) {
+                                    let txt = (node.innerText || node.textContent || "").toLowerCase();
+                                    if (txt.length > 5 && txt.length < 150) {
+                                        if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                            window.__capturedError = (node.innerText || node.textContent).trim();
+                                        } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
+                                            window.__capturedSuccess = (node.innerText || node.textContent).trim();
+                                        }
+                                    }
+                                }
+                            }
+                            
                             window.__toastObserver = new MutationObserver((mutations) => {
                                 for (let mut of mutations) {
-                                    for (let node of mut.addedNodes) {
-                                        if (node.nodeType === 1) { // ELEMENT_NODE
-                                            let txt = (node.innerText || node.textContent || "").toLowerCase();
-                                            if (txt.length > 5 && txt.length < 150) {
-                                                if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
-                                                    window.__capturedError = (node.innerText || node.textContent).trim();
-                                                } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
-                                                    window.__capturedSuccess = (node.innerText || node.textContent).trim();
-                                                }
-                                            }
+                                    scanNodeForToast(mut.target);
+                                    if (mut.addedNodes) {
+                                        for (let node of mut.addedNodes) {
+                                            scanNodeForToast(node);
                                         }
                                     }
                                 }
                             });
-                            window.__toastObserver.observe(document.body, { childList: true, subtree: true });
+                            window.__toastObserver.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
                         }""")
                         elem.click(force=True)
                         submit_clicked = True
@@ -1507,23 +1516,31 @@ class PlaywrightAutomationEngine:
                             page.evaluate("""() => {
                                 window.__capturedError = null;
                                 window.__capturedSuccess = null;
+                                
+                                function scanNodeForToast(node) {
+                                    if (node && node.nodeType === 1) {
+                                        let txt = (node.innerText || node.textContent || "").toLowerCase();
+                                        if (txt.length > 5 && txt.length < 150) {
+                                            if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
+                                                window.__capturedError = (node.innerText || node.textContent).trim();
+                                            } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
+                                                window.__capturedSuccess = (node.innerText || node.textContent).trim();
+                                            }
+                                        }
+                                    }
+                                }
+                                
                                 window.__toastObserver = new MutationObserver((mutations) => {
                                     for (let mut of mutations) {
-                                        for (let node of mut.addedNodes) {
-                                            if (node.nodeType === 1) { // ELEMENT_NODE
-                                                let txt = (node.innerText || node.textContent || "").toLowerCase();
-                                                if (txt.length > 5 && txt.length < 150) {
-                                                    if (txt.includes("already exist") || txt.includes("exists") || txt.includes("duplicate") || txt.includes("already taken") || txt.includes("registered") || txt.includes("failed")) {
-                                                        window.__capturedError = (node.innerText || node.textContent).trim();
-                                                    } else if (txt.includes("success") || txt.includes("created") || txt.includes("saved") || txt.includes("successfully")) {
-                                                        window.__capturedSuccess = (node.innerText || node.textContent).trim();
-                                                    }
-                                                }
+                                        scanNodeForToast(mut.target);
+                                        if (mut.addedNodes) {
+                                            for (let node of mut.addedNodes) {
+                                                scanNodeForToast(node);
                                             }
                                         }
                                     }
                                 });
-                                window.__toastObserver.observe(document.body, { childList: true, subtree: true });
+                                window.__toastObserver.observe(document.body, { childList: true, subtree: true, attributes: true, characterData: true });
                             }""")
                             
                             elem.click()
