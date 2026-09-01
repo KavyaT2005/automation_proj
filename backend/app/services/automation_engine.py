@@ -534,16 +534,30 @@ class PlaywrightAutomationEngine:
                 
             # 3. Check for explicit validation/submission error messages on screen
             error_msg = page.evaluate("""() => {
-                // Check Mui-error or error classes
-                let errorEls = Array.from(document.querySelectorAll(".Mui-error, .error, .invalid-feedback, .error-message, .alert-danger"));
+                // Check Mui-error or error classes AND toast notifications
+                let errorEls = Array.from(document.querySelectorAll(".Mui-error, .error, .invalid-feedback, .error-message, .alert-danger, .MuiAlert-message, .toast, .notification"));
+                
                 let visibleErrors = errorEls.filter(el => {
                     let style = window.getComputedStyle(el);
                     return style.display !== 'none' && style.visibility !== 'hidden' && el.offsetWidth > 0;
                 });
+                
                 if (visibleErrors.length > 0) {
                     let errTexts = visibleErrors.map(el => el.innerText.trim()).filter(Boolean);
-                    let uniq = Array.from(new Set(errTexts));
-                    return uniq.length > 0 ? uniq.join("; ") : "Form submission failed due to validation errors.";
+                    
+                    // Filter out actual success messages
+                    let trueErrors = errTexts.filter(txt => {
+                        let t = txt.toLowerCase();
+                        if (t.includes("success") || t.includes("created") || t.includes("saved") || t.includes("successfully")) {
+                            return false;
+                        }
+                        return true;
+                    });
+                    
+                    let uniq = Array.from(new Set(trueErrors));
+                    if (uniq.length > 0) {
+                        return uniq.join("; ");
+                    }
                 }
                 
                 // Check if any required field has aria-invalid=\"true\"
